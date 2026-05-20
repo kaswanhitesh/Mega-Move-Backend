@@ -87,7 +87,7 @@ def push_to_zoho_crm(module, data_list):
     url = f"https://www.zohoapis.in/crm/v3/{module}" 
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}", "Content-Type": "application/json"}
     requests.post(url, json={"data": data_list}, headers=headers)
-cat << 'EOF' > main.py
+
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 import os

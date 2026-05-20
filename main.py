@@ -31,7 +31,6 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     return {"status": "success"}
 
 def send_whatsapp_message(to_number, text):
-    """Sends an automated text back to your WhatsApp."""
     phone_id = os.getenv("WHATSAPP_PHONE_ID")
     url = f"https://graph.facebook.com/v18.0/{phone_id}/messages"
     headers = {
@@ -168,24 +167,45 @@ def process_whatsapp_message(payload):
             
         msg = messages[0]
         msg_type = msg.get("type")
-        sender_phone = msg.get("from") # The phone number sending the message
+        sender_phone = msg.get("from")
         
         if msg_type == "text":
-            msg_text = msg.get('text', {}).get('body', '')
-            prompt = f"Extract freight details: {msg_text}"
+            msg_text = msg.get('text', {}).get('body', '').strip()
+            
+            # 1. NEW: The Greeting & Menu Catch
+            greetings = ["hi", "hello", "hey", "help", "menu", "start", "ping"]
+            if msg_text.lower() in greetings:
+                welcome_msg = (
+                    "👋 *Hello! I am your Mega Move AI OS.*\n\n"
+                    "Here is what I am ready to do for you:\n\n"
+                    "📦 *Log an RFQ:*\nJust text me a route (e.g., 'Quote for 1x20ft from POL to POD').\n\n"
+                    "📄 *Upload Vendor Rates:*\nSend an Excel/PDF file and type 'rates' in the caption.\n\n"
+                    "🧾 *Process Vendor Bills:*\nSend a PDF invoice and type 'bill' in the caption.\n\n"
+                    "👥 *Upload Trade Show Leads:*\nSend an Excel file and type 'leads' in the caption."
+                )
+                send_whatsapp_message(sender_phone, welcome_msg)
+                return
+            
+            # 2. If it's not a greeting, assume it is an RFQ
+            prompt = f"Extract freight details from this text: '{msg_text}'. If it does not contain logistics info, return empty values. Return JSON: pol, pod, commodity, container_type, weight. JSON only."
             response = client.chat.completions.create(
                 model="gpt-4o",
-                messages=[{"role": "system", "content": "Return JSON: pol, pod, commodity, container_type, weight. JSON only."},{"role": "user", "content": prompt}],
+                messages=[{"role": "system", "content": "You are a logistics parser. Output only valid JSON."},{"role": "user", "content": prompt}],
                 response_format={ "type": "json_object" }
             )
             extracted_data = json.loads(response.choices[0].message.content)
-            push_to_zoho_crm("Deals", [{
-                "Deal_Name": f"RFQ - {extracted_data.get('pol')} to {extracted_data.get('pod')}",
-                "Stage": "Qualification",
-                "Description": f"Commodity: {extracted_data.get('commodity')}\nContainer: {extracted_data.get('container_type')}\nWeight: {extracted_data.get('weight')}"
-            }])
-            send_whatsapp_message(sender_phone, f"✅ RFQ Logged: Deal created in Zoho CRM for {extracted_data.get('pol')} to {extracted_data.get('pod')}.")
             
+            # Extra safety check: Did it actually find a port?
+            if extracted_data.get('pol') or extracted_data.get('pod'):
+                push_to_zoho_crm("Deals", [{
+                    "Deal_Name": f"RFQ - {extracted_data.get('pol', 'Unknown')} to {extracted_data.get('pod', 'Unknown')}",
+                    "Stage": "Qualification",
+                    "Description": f"Commodity: {extracted_data.get('commodity')}\nContainer: {extracted_data.get('container_type')}\nWeight: {extracted_data.get('weight')}"
+                }])
+                send_whatsapp_message(sender_phone, f"✅ RFQ Logged: Deal created in Zoho CRM for {extracted_data.get('pol', 'Unknown')} to {extracted_data.get('pod', 'Unknown')}.")
+            else:
+                send_whatsapp_message(sender_phone, "🤖 I didn't recognize any specific routing details in that message. If you need a quote, try phrasing it like: 'Need rates from Dubai to Mumbai for 1x20ft.'")
+                
         elif msg_type == "document":
             doc_info = msg.get("document", {})
             media_id = doc_info.get("id")
@@ -202,6 +222,10 @@ def process_whatsapp_message(payload):
                 process_pdf_invoice(file_bytes, sender_phone)
             elif "lead" in caption:
                 process_bulk_leads(file_bytes, filename, sender_phone)
+            else:
+                send_whatsapp_message(sender_phone, "🤖 I received the document, but I don't know what to do with it! Please re-upload and type 'rates', 'bill', or 'leads' in the caption.")
                 
     except Exception as e:
+        # Now it will actually text you if it crashes, instead of just printing to the console
+        send_whatsapp_message(sender_phone, f"⚠️ System encountered an error: {str(e)}")
         print(f"System Error: {e}")

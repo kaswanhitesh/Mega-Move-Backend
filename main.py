@@ -134,6 +134,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Mega Move AI Backend", lifespan=lifespan)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+def extract_numeric_price(price_val):
+    """Safely extracts a float from a messy price string. Returns inf if invalid."""
+    try:
+        if price_val is None: return float('inf')
+        # Strip everything except digits and decimals
+        clean_val = re.sub(r'[^\d.]', '', str(price_val))
+        if not clean_val or clean_val == '.': return float('inf')
+        return float(clean_val)
+    except:
+        return float('inf')
+
 def standardize_port_name(raw_port):
     """Standardizes port names using the UN/LOCODE global database and RapidFuzz."""
     if not raw_port:
@@ -990,12 +1001,17 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
             pol = rate.get('pol', 'Unknown')
             pod = rate.get('pod', 'Unknown')
             eq_type = rate.get('equipment_type', 'Unknown')
-            price = float(rate.get('ocean_freight', 0.0))
             
-            if price <= 0: continue
+            # Use safe numeric extractor
+            current_price = extract_numeric_price(rate.get('ocean_freight'))
+            if current_price == float('inf') or current_price <= 0: continue
             
             key = (carrier, pol, pod, eq_type)
-            if key not in dedup_map or price < dedup_map[key]['ocean_freight']:
+            if key in dedup_map:
+                existing_price = extract_numeric_price(dedup_map[key].get('ocean_freight'))
+                if current_price < existing_price:
+                    dedup_map[key] = rate
+            else:
                 dedup_map[key] = rate
 
         if wa_id:
@@ -1205,7 +1221,7 @@ async def process_whatsapp_message(payload):
         if message.get("type") == "document":
             doc = message.get("document")
             media_id = doc.get("id")
-            filename = doc.get("filename")
+            filename = str(doc.get("filename", "")).lower()
             caption = str(doc.get("caption", "")).lower()
             print(f"Received document: {filename} with caption: '{caption}'")
             
@@ -1215,8 +1231,10 @@ async def process_whatsapp_message(payload):
             media_url = media_url_res.json().get("url")
             file_bytes = requests.get(media_url, headers={"Authorization": f"Bearer {access_token}"}).content
             
-            # RELATIONAL PRICING: Check for Local Charges Tariff
-            if "local charges" in caption or "tariff" in caption:
+            # RELATIONAL PRICING: Check for Local Charges Tariff (Caption or Filename)
+            is_tariff = "local" in caption or "tariff" in caption or "local" in filename or "tariff" in filename
+            
+            if is_tariff:
                 send_whatsapp_message(from_number, "📄 *Local Charges Tariff Received.* Analyzing Carrier and standardizing fees...")
                 background_tasks.add_task(process_local_charges_pdf, file_bytes, from_number)
                 return

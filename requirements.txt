@@ -31,3 +31,4 @@ typing_extensions==4.15.0
 urllib3==2.7.0
 uvicorn==0.47.0
 rapidfuzz==3.12.1
+apscheduler==3.11.0

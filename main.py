@@ -14,6 +14,8 @@ from rapidfuzz import process, fuzz
 import base64
 import asyncio
 from contextlib import asynccontextmanager
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # --- GLOBAL STATE ---
 PENDING_TASKS = {}
@@ -21,13 +23,70 @@ PROCESSED_MESSAGE_IDS = set()
 LAST_CLEANUP = datetime.now()
 IMAGE_BUFFER = {}
 
+async def run_daily_financial_audit():
+    """Executes overdue invoice checks and vendor bill mismatch audits."""
+    print("DEBUG: Starting Daily Financial Audit...")
+    admin_number = os.getenv("YOUR_WHATSAPP_NUMBER")
+    if not admin_number:
+        print("CRITICAL: Admin WhatsApp number missing. Audit skipped.")
+        return
+
+    # 1. Check Overdue Invoices
+    try:
+        overdue_invoices = check_overdue_invoices()
+        for inv in overdue_invoices:
+            days = inv.get("days_overdue", "3+")
+            msg = (
+                f"⚠️ *Overdue Payment Alert*\n"
+                f"Client: {inv.get('customer_name')}\n"
+                f"Invoice: {inv.get('invoice_number')}\n"
+                f"Amount: {inv.get('currency_code')} {inv.get('total')}\n"
+                f"Days Overdue: {days}\n"
+                f"*Draft Reply:* \"Hi {inv.get('customer_name')}, gentle reminder regarding invoice {inv.get('invoice_number')}. Please let us know the status of payment.\""
+            )
+            send_whatsapp_message(admin_number, msg)
+    except Exception as e:
+        print(f"Audit Error (Overdue Invoices): {e}")
+
+    # 2. Check Vendor Bill Mismatches
+    try:
+        mismatches = check_vendor_bill_mismatches()
+        for m in mismatches:
+            msg = (
+                f"🚨 *Margin Mismatch Alert*\n"
+                f"Vendor: {m.get('vendor_name')}\n"
+                f"Bill: {m.get('bill_number')}\n"
+                f"Billed Amount: {m.get('bill_amount')}\n"
+                f"CRM Expected Cost: {m.get('crm_expected')}\n"
+                f"Variance: {m.get('variance')}% - *Action Required in Zoho Books*"
+            )
+            send_whatsapp_message(admin_number, msg)
+    except Exception as e:
+        print(f"Audit Error (Bill Mismatches): {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup logic here
     print("Mega Move AI Backend Starting Up...")
+    
+    # Initialize and Start Scheduler for Financial Audits
+    scheduler = AsyncIOScheduler()
+    
+    # Check for TEST_MODE to run more frequently
+    if os.getenv("TEST_MODE") == "true":
+        print("DEBUG: TEST_MODE active. Running financial audit every 5 minutes.")
+        scheduler.add_job(run_daily_financial_audit, 'interval', minutes=5)
+    else:
+        # Run daily at 09:00 AM IST (UTC+5:30 -> 03:30 AM UTC)
+        print("DEBUG: Scheduling daily financial audit at 09:00 AM IST.")
+        scheduler.add_job(run_daily_financial_audit, CronTrigger(hour=3, minute=30))
+    
+    scheduler.start()
+    
     yield
     # Shutdown logic here
     print("Mega Move AI Backend Shutting Down...")
+    scheduler.shutdown()
 
 app = FastAPI(title="Mega Move AI Backend", lifespan=lifespan)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -149,6 +208,68 @@ def upload_and_send_pdf(to_number, file_bytes, filename, caption):
         "document": {"id": media_id, "caption": caption, "filename": filename}
     }
     requests.post(send_url, headers=headers, json=payload)
+
+# --- ACCOUNTING & AUDIT LOGIC (PHASE 5) ---
+def check_overdue_invoices():
+    """Queries Zoho Books for invoices 3+ days overdue."""
+    access_token = get_zoho_access_token()
+    org_id = os.getenv("ZOHO_BOOKS_ORG_ID")
+    if not org_id: return []
+    
+    url = f"https://www.zohoapis.in/books/v3/invoices?status=overdue&organization_id={org_id}"
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    res = requests.get(url, headers=headers)
+    
+    overdue_list = []
+    if res.status_code == 200:
+        invoices = res.json().get("invoices", [])
+        for inv in invoices:
+            # Calculate days overdue
+            due_date = datetime.strptime(inv.get("due_date"), "%Y-%m-%d").date()
+            days_overdue = (datetime.now().date() - due_date).days
+            if days_overdue >= 3:
+                inv["days_overdue"] = days_overdue
+                overdue_list.append(inv)
+    return overdue_list
+
+def check_vendor_bill_mismatches():
+    """Compares Zoho Books Bills against CRM Deal costs to find discrepancies."""
+    access_token = get_zoho_access_token()
+    org_id = os.getenv("ZOHO_BOOKS_ORG_ID")
+    if not org_id: return []
+    
+    # 1. Fetch Open Bills from Zoho Books
+    url = f"https://www.zohoapis.in/books/v3/bills?status=open&organization_id={org_id}"
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    res = requests.get(url, headers=headers)
+    
+    mismatches = []
+    if res.status_code == 200:
+        bills = res.json().get("bills", [])
+        for bill in bills:
+            reference = bill.get("reference_number", "") # Assume INQ number is here
+            if not reference.startswith("INQ"): continue
+            
+            # 2. Query CRM Deal for expected cost (Buy Rate)
+            crm_url = f"https://www.zohoapis.in/crm/v3/Deals/search?criteria=(Deal_Name:equals:{reference})"
+            crm_res = requests.get(crm_url, headers=headers)
+            
+            if crm_res.status_code == 200 and crm_res.json().get("data"):
+                deal = crm_res.json()["data"][0]
+                expected_cost = float(deal.get("Buy_Rate") or 0)
+                bill_amount = float(bill.get("total") or 0)
+                
+                if expected_cost > 0:
+                    variance = ((bill_amount - expected_cost) / expected_cost) * 100
+                    if variance > 5: # Flag if bill is > 5% higher than expected
+                        mismatches.append({
+                            "vendor_name": bill.get("vendor_name"),
+                            "bill_number": bill.get("bill_number"),
+                            "bill_amount": bill_amount,
+                            "crm_expected": expected_cost,
+                            "variance": f"{variance:.2f}"
+                        })
+    return mismatches
 
 def get_zoho_access_token():
     url = "https://accounts.zoho.in/oauth/v2/token" 

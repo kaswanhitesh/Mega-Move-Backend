@@ -86,7 +86,17 @@ def push_to_zoho_crm(module, data_list):
     access_token = get_zoho_access_token()
     url = f"https://www.zohoapis.in/crm/v3/{module}" 
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}", "Content-Type": "application/json"}
-    requests.post(url, json={"data": data_list}, headers=headers)
+    response = requests.post(url, json={"data": data_list}, headers=headers)
+    
+    if response.status_code not in [200, 201, 202]:
+        raise Exception(f"Zoho API Global Error ({response.status_code}): {response.text}")
+
+    res_data = response.json().get("data", [])
+    for idx, item in enumerate(res_data):
+        if item.get("status") == "error":
+            error_details = item.get("details", {})
+            error_msg = item.get("message", "Unknown Error")
+            raise Exception(f"Zoho Record Error [Row {idx+1}]: {error_msg} (Details: {error_details})")
 
 # --- DYNAMIC AUTO-NUMBERING ---
 def generate_next_inquiry_number():
@@ -246,8 +256,11 @@ def process_rate_sheet(file_content, filename, vendor_name):
             })
         
         if zoho_data:
-            push_to_zoho_crm("CustomModule1", zoho_data)
-            return f"Successfully processed {len(zoho_data)} rates for {vendor_name}."
+            try:
+                push_to_zoho_crm("CustomModule1", zoho_data)
+                return f"Successfully processed {len(zoho_data)} rates for {vendor_name}."
+            except Exception as zoho_err:
+                return f"⚠️ Zoho CRM Error: {str(zoho_err)}"
         return "No rates could be extracted."
 
     except Exception as e:

@@ -13,15 +13,24 @@ from datetime import datetime
 from rapidfuzz import process, fuzz
 import base64
 import asyncio
-
-app = FastAPI(title="Mega Move AI Backend")
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+from contextlib import asynccontextmanager
 
 # --- GLOBAL STATE ---
 PENDING_TASKS = {}
 PROCESSED_MESSAGE_IDS = set()
 LAST_CLEANUP = datetime.now()
 IMAGE_BUFFER = {}
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic here
+    print("Mega Move AI Backend Starting Up...")
+    yield
+    # Shutdown logic here
+    print("Mega Move AI Backend Shutting Down...")
+
+app = FastAPI(title="Mega Move AI Backend", lifespan=lifespan)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # --- MASTER CONFIGURATION ---
 PORT_ALIASES = {
@@ -626,7 +635,7 @@ def process_email_rfq(payload):
         print(f"Email Processing Error: {e}")
 
 # --- WHATSAPP MESSAGE PROCESSING ---
-def process_whatsapp_message(payload):
+async def process_whatsapp_message(payload):
     """Handles incoming WhatsApp messages/files and triggers AI processing."""
     print(f"Incoming Webhook Payload: {json.dumps(payload)}")
     

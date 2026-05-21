@@ -169,24 +169,29 @@ async def verify_whatsapp(request: Request):
 async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
     
-    # 0. IDEMPOTENCY CHECK (Instant return for retries)
+    # 0. IDEMPOTENCY & STATUS CHECK
     try:
-        entries = payload.get("entry", [])
-        if entries:
-            changes = entries[0].get("changes", [])
-            if changes:
-                value = changes[0].get("value", {})
-                messages = value.get("messages", [])
-                if messages:
-                    message_id = messages[0].get("id")
-                    if message_id in PROCESSED_MESSAGE_IDS:
-                        print(f"DEBUG: Ignoring duplicate message_id: {message_id}")
-                        return {"status": "ignored_duplicate"}
-                    
-                    # Add to cache and proceed
-                    PROCESSED_MESSAGE_IDS.add(message_id)
+        value = payload.get('entry', [{}])[0].get('changes', [{}])[0].get('value', {})
+        
+        # 0.1 Silently acknowledge status updates (read/delivered receipts) to prevent crashes
+        if 'statuses' in value:
+            return {"status": "success"}
+            
+        messages = value.get('messages', [])
+        if not messages:
+            return {"status": "success"}
+
+        message_id = messages[0].get('id')
+        if message_id in PROCESSED_MESSAGE_IDS:
+            print(f"DEBUG: Ignoring duplicate message_id: {message_id}")
+            return {"status": "ignored_duplicate"}
+        
+        # Add to cache and proceed
+        PROCESSED_MESSAGE_IDS.add(message_id)
+
     except Exception as e:
-        print(f"Idempotency Check Error: {e}")
+        print(f"Webhook Safety Check Error: {e}")
+        return {"status": "success"} # Still return success to prevent retries on error
 
     # Process everything in the background to ensure Meta gets a 200 OK instantly
     background_tasks.add_task(process_whatsapp_message, payload)
@@ -488,11 +493,9 @@ def search_rates(pol, pod):
 def process_inquiry(text):
     """Analyzes text to find rates. Returns (reply_text, extracted_details)."""
     system_prompt = (
-        "You are an expert freight forwarder AI. Extract the routing and cargo details into JSON. "
-        "Keys: pol, pod, commodity, equipment_type, weight, cargo_category. "
-        "For 'equipment_type', explicitly capture standard containers (e.g., 20DC, 40HC), "
-        "AND special equipment (Flat Racks, Open Tops, Flatbeds, Breakbulk, RoRo). "
-        "For 'cargo_category', classify as 'General', 'Hazardous', 'Perishable', or 'Project Cargo/OOG'."
+        "You are an expert freight forwarder AI. Output strictly valid JSON with EXACTLY these keys: "
+        "'shipper', 'pol', 'pod', 'commodity', 'equipment_type', 'weight'. Do not alter these key names. "
+        "If data is missing, return 'Unknown'."
     )
     prompt = f"Message: {text}"
     response = client.chat.completions.create(
@@ -502,12 +505,13 @@ def process_inquiry(text):
         response_format={ "type": "json_object" }
     )
     extracted = json.loads(response.choices[0].message.content)
-    # Map for backward compatibility with downstream functions
-    extracted['pol'] = extracted.get('pol')
-    extracted['pod'] = extracted.get('pod')
-    pol, pod = extracted.get('pol'), extracted.get('pod')
     
-    if pol and pod:
+    # Safely extract with 'Unknown' defaults
+    pol = extracted.get('pol', 'Unknown')
+    pod = extracted.get('pod', 'Unknown')
+    commodity = extracted.get('commodity', 'Unknown')
+    
+    if pol != 'Unknown' and pod != 'Unknown':
         rates = search_rates(pol, pod)
         if rates:
             margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
@@ -545,12 +549,9 @@ def process_inquiry(text):
 def process_image_inquiry(image_bytes_list):
     """Analyzes multiple images using GPT-4o-vision. Returns extracted JSON."""
     system_prompt = (
-        "You are an expert freight forwarder AI analyzing screenshots of inquiry emails. "
-        "Extract the Shipper Name, POL, POD, Cargo Details, and Readiness date into JSON. "
-        "Keys: pol, pod, commodity, equipment_type, weight, cargo_category, shipper, readiness. "
-        "For 'equipment_type', explicitly capture standard containers (e.g., 20DC, 40HC), "
-        "AND special equipment (Flat Racks, Open Tops, Flatbeds, Breakbulk, RoRo). "
-        "For 'cargo_category', classify as 'General', 'Hazardous', 'Perishable', or 'Project Cargo/OOG'."
+        "You are an expert freight forwarder AI. Output strictly valid JSON with EXACTLY these keys: "
+        "'shipper', 'pol', 'pod', 'commodity', 'equipment_type', 'weight', 'readiness'. "
+        "Do not alter these key names. If data is missing, return 'Unknown'."
     )
     content = [{"type": "text", "text": system_prompt}]
     
@@ -584,11 +585,9 @@ def process_inquiry_email(raw_data, wa_id=None):
     """Parses inquiry details from a document and logs to Zoho 'New Enquiries'."""
     try:
         system_prompt = (
-            "You are an expert freight forwarder AI. Extract inquiry details from the provided document data into JSON. "
-            "Keys: shipper, pol, pod, commodity, equipment_type, weight, cargo_category, incoterms. "
-            "For 'equipment_type', explicitly capture standard containers (e.g., 20DC, 40HC), "
-            "AND special equipment (Flat Racks, Open Tops, Flatbeds, Breakbulk, RoRo). "
-            "For 'cargo_category', classify as 'General', 'Hazardous', 'Perishable', or 'Project Cargo/OOG'."
+            "You are an expert freight forwarder AI. Output strictly valid JSON with EXACTLY these keys: "
+            "'shipper', 'pol', 'pod', 'commodity', 'equipment_type', 'weight', 'incoterms'. "
+            "Do not alter these key names. If data is missing, return 'Unknown'."
         )
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -598,22 +597,28 @@ def process_inquiry_email(raw_data, wa_id=None):
         )
         extracted = json.loads(response.choices[0].message.content)
         
+        # Safely extract with 'Unknown' defaults
+        pol = extracted.get('pol', 'Unknown')
+        pod = extracted.get('pod', 'Unknown')
+        shipper = extracted.get('shipper', 'Unknown')
+        commodity = extracted.get('commodity', 'Unknown')
+        
         # Log to Zoho CRM (New Enquiries module)
         inq_number = generate_next_inquiry_number()
         enquiry_data = {
             "Deal_Name": inq_number,
             "Stage": "Qualification",
-            "Description": f"PDF Inquiry Extracted\nShipper: {extracted.get('Shipper Name')}\nRoute: {extracted.get('POL')} to {extracted.get('POD')}\nSpecs: {extracted.get('Cargo Specifications')}\nIncoterms: {extracted.get('Incoterms')}\nSource: PDF Document"
+            "Description": f"PDF Inquiry Extracted\nShipper: {shipper}\nRoute: {pol} to {pod}\nSpecs: {extracted.get('equipment_type', 'Unknown')}, {extracted.get('weight', 'Unknown')}\nCommodity: {commodity}\nIncoterms: {extracted.get('incoterms', 'Unknown')}\nSource: PDF Document"
         }
         
         if wa_id:
             PENDING_TASKS[wa_id] = {
                 'action': 'log_enquiry',
-                'description': f"log an enquiry for {extracted.get('POL')} to {extracted.get('POD')}",
+                'description': f"log an enquiry for {pol} to {pod}",
                 'module': 'New Enquiries',
                 'data': enquiry_data
             }
-            summary = f"📊 *Inquiry Parsed!*\n\nShipper: {extracted.get('Shipper Name')}\nRoute: {extracted.get('POL')} to {extracted.get('POD')}\n\nReply *YES* to log this as a New Enquiry in Zoho CRM."
+            summary = f"📊 *Inquiry Parsed!*\n\nShipper: {shipper}\nRoute: {pol} to {pod}\n\nReply *YES* to log this as a New Enquiry in Zoho CRM."
             send_whatsapp_message(wa_id, summary)
             return summary
             
@@ -684,8 +689,10 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         # 2. CONTINUING AS VENDOR_RATE_SHEET
         # UNIVERSAL PARSING PROMPT - CALIBRATED FOR COMPLEX LOGISTICS EDGE CASES
         system_prompt = (
-            "You are an expert logistics data engineer. Convert messy vendor rate sheets into structured JSON. "
-            "Standardize types to '20ft' or '40ft' and handle row splitting for multi-column price sheets."
+            "You are an expert freight forwarder AI. Output strictly valid JSON with EXACTLY these keys: "
+            "'shipper', 'pol', 'pod', 'commodity', 'equipment_type', 'weight', 'validity_date', 'transit_time', 'route'. "
+            "Do not alter these key names. If data is missing, return 'Unknown'. "
+            "Standardize container types to '20ft' or '40ft' and handle row splitting for multi-column price sheets."
         )
         prompt = f"""
         VENDOR NAME: PIL (INDIA) PVT. LTD
@@ -759,22 +766,22 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         zoho_data = []
         for rate in extracted_rates:
             carrier_name = "PIL (INDIA) PVT. LTD"
-            norm_pol = normalize_port_name(rate.get("pol"))
-            norm_pod = normalize_port_name(rate.get("pod"))
+            norm_pol = normalize_port_name(rate.get("pol", "Unknown"))
+            norm_pod = normalize_port_name(rate.get("pod", "Unknown"))
             
-            # Standardize container type and keys for mapping
-            c_type = rate.get("container_type", "")
-            r_key = f"{carrier_name}_{norm_pol}_{norm_pod}_{c_type}".upper().replace(" ", "_")
+            # Standardize equipment type and keys for mapping
+            eq_type = rate.get("equipment_type", "Unknown")
+            r_key = f"{carrier_name}_{norm_pol}_{norm_pod}_{eq_type}".upper().replace(" ", "_")
             
             zoho_data.append({
-                "Name": f"{carrier_name} - {norm_pol} to {norm_pod} - {c_type}",
+                "Name": f"{carrier_name} - {norm_pol} to {norm_pod} - {eq_type}",
                 "POL": norm_pol,
                 "POD": norm_pod,
-                "Container_Type": str(c_type),
-                "Transit_Time": str(rate.get("transit_time", "")),
-                "Route": str(rate.get("route", "")),
+                "Container_Type": str(eq_type),
+                "Transit_Time": str(rate.get("transit_time", "Unknown")),
+                "Route": str(rate.get("route", "Unknown")),
                 "Rate_Key": str(r_key),
-                "Validity_Date": rate.get("validity_date"),
+                "Validity_Date": rate.get("validity_date", "Unknown"),
                 "Subform_3": [
                     {
                         "Vendor_Name": carrier_name,
@@ -1010,14 +1017,19 @@ async def process_whatsapp_message(payload):
                     # Clear buffer early to prevent race conditions on subsequent messages
                     IMAGE_BUFFER.pop(from_number, None)
                     
-                    commodity = extracted.get("commodity") or extracted.get("Cargo Details", "General Cargo")
+                    commodity = extracted.get("commodity", "Unknown")
+                    shipper = extracted.get("shipper", "Unknown")
+                    pol = extracted.get("pol", "Unknown")
+                    pod = extracted.get("pod", "Unknown")
+                    readiness = extracted.get("readiness", "Unknown")
+                    
                     inq_number = generate_next_inquiry_number()
                     
                     enquiry_data = {
                         "Deal_Name": inq_number,
                         "Stage": "Qualification",
                         "Type": "Project Cargo",
-                        "Description": f"Vision AI Multi-Image Inquiry\nShipper: {extracted.get('Shipper Name')}\nRoute: {extracted.get('POL')} to {extracted.get('POD')}\nCargo: {commodity}\nReadiness: {extracted.get('Readiness date')}\nSource: WhatsApp Images ({len(images_to_process)} files)"
+                        "Description": f"Vision AI Multi-Image Inquiry\nShipper: {shipper}\nRoute: {pol} to {pod}\nCargo: {commodity}\nSpecs: {extracted.get('equipment_type', 'Unknown')}, {extracted.get('weight', 'Unknown')}\nReadiness: {readiness}\nSource: WhatsApp Images ({len(images_to_process)} files)"
                     }
                     
                     PENDING_TASKS[from_number] = {
@@ -1099,14 +1111,17 @@ async def process_whatsapp_message(payload):
             reply, extracted = process_inquiry(text_lower)
             
             # 2. PROJECT CARGO / OOG DETECTION
-            commodity = str(extracted.get('commodity', '')).title()
+            commodity = extracted.get('commodity', 'Unknown').title()
+            pol = extracted.get('pol', 'Unknown')
+            pod = extracted.get('pod', 'Unknown')
+            
             if any(k in commodity for k in ["Crane", "Excavator", "Machine", "Oog"]):
                 inq_number = generate_next_inquiry_number()
                 enquiry_data = {
                     "Deal_Name": inq_number,
                     "Stage": "Qualification",
                     "Type": "Project Cargo",
-                    "Description": f"Detected Project Cargo (OOG)\nRoute: {extracted.get('pol')} to {extracted.get('pod')}\nCommodity: {commodity}\nDimensions: {extracted.get('dimensions', 'N/A')}\nWeight: {extracted.get('weight', 'N/A')}\nSource: WhatsApp"
+                    "Description": f"Detected Project Cargo (OOG)\nRoute: {pol} to {pod}\nCommodity: {commodity}\nSpecs: {extracted.get('equipment_type', 'Unknown')}, {extracted.get('weight', 'Unknown')}\nSource: WhatsApp"
                 }
                 
                 PENDING_TASKS[from_number] = {
@@ -1127,14 +1142,13 @@ async def process_whatsapp_message(payload):
             if text in ["hi", "hello", "hey"]:
                 send_whatsapp_message(from_number, "👋 Hello! I am the Mega Move AI. Send me a rate sheet or an inquiry to get started.")
             else:
-                pol, pod = extracted.get('pol'), extracted.get('pod')
-                if pol and pod:
+                if pol != 'Unknown' and pod != 'Unknown':
                     # PROMPT FOR CONFIRMATION instead of logging immediately
                     inq_number = generate_next_inquiry_number()
                     enquiry_data = {
                         "Deal_Name": inq_number,
                         "Stage": "Qualification",
-                        "Description": f"Source: WhatsApp\nRoute: {pol} to {pod}\nCommodity: {extracted.get('commodity')}"
+                        "Description": f"Source: WhatsApp\nRoute: {pol} to {pod}\nCommodity: {commodity}\nSpecs: {extracted.get('equipment_type', 'Unknown')}, {extracted.get('weight', 'Unknown')}"
                     }
                     
                     PENDING_TASKS[from_number] = {

@@ -277,10 +277,12 @@ def process_rate_sheet(file_content, filename, vendor_name):
                 
                 return f"Successfully processed {len(zoho_data)} rates for {vendor_name}."
             except Exception as zoho_err:
+                print(f"CRITICAL ERROR: {str(zoho_err)}")
                 return f"⚠️ Zoho CRM Error: {str(zoho_err)}"
         return "No rates could be extracted."
 
     except Exception as e:
+        print(f"CRITICAL ERROR: {str(e)}")
         return f"Error processing rate sheet: {e}"
 
 # --- EMAIL PROCESSING LOGIC ---
@@ -360,6 +362,7 @@ def process_email_rfq(payload):
 # --- WHATSAPP MESSAGE PROCESSING ---
 def process_whatsapp_message(payload):
     """Handles incoming WhatsApp messages/files and triggers AI processing."""
+    print(f"Incoming Webhook Payload: {json.dumps(payload)}")
     try:
         # SAFETY CHECK FOR EMPTY PAYLOADS (Meta Delivery Receipts / Status Updates)
         entries = payload.get("entry", [])
@@ -384,6 +387,8 @@ def process_whatsapp_message(payload):
             doc = message.get("document")
             media_id = doc.get("id")
             filename = doc.get("filename")
+            caption = doc.get("caption", "")
+            print(f"Received document: {filename} with caption: '{caption}'")
             
             access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
             media_url_res = requests.get(f"https://graph.facebook.com/v18.0/{media_id}", 
@@ -428,4 +433,5 @@ def process_whatsapp_message(payload):
                         send_whatsapp_message(from_number, f"⚠️ I've logged your inquiry {inq_number}, but I couldn't find an instant rate for {pol} to {pod}.")
 
     except Exception as e:
+        print(f"CRITICAL ERROR: {str(e)}")
         print(f"WhatsApp Processing Error: {e}")

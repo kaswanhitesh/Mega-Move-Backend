@@ -1313,6 +1313,24 @@ async def process_whatsapp_message(payload):
             text = str(message.get("text", {}).get("body", "")).strip()
             text_lower = text.lower()
             
+            # --- HELP / MENU DIRECTORY ---
+            if text_lower in ["captions", "help", "menu", "commands"]:
+                help_msg = (
+                    "🤖 *Mega Move AI - Command Directory*\n\n"
+                    "*💬 Text Commands:*\n"
+                    "• *APPROVE [INQ-XXX]* : Finds lowest O/F rates & local charges.\n"
+                    "• *QUOTE [INQ-XXX]* : Generates the PDF quotation.\n"
+                    "• *SEND [INQ-XXX]* : Emails the PDF to the client.\n"
+                    "• *Outstanding [Vendor]* : Pulls live balances from Zoho Books.\n"
+                    "• *Metrics* : Displays Executive Dashboard (Sales & Financials).\n\n"
+                    "*📄 Document Uploads:*\n"
+                    "• *Excel Rate Sheets* : (No caption needed) Upload an .xlsx file to extract and update ocean freight rates in Zoho CRM.\n"
+                    "• *PDF Tariffs* : Upload a carrier PDF with the caption *'local charges'* to extract origin/destination fees.\n\n"
+                    "Type any of these commands to execute."
+                )
+                send_whatsapp_message(from_number, help_msg)
+                return
+
             # CHECK FOR PENDING TASKS (Human-in-the-Loop)
             if from_number in PENDING_TASKS:
                 handle_confirmation(text, from_number)

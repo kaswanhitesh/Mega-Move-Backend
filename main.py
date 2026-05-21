@@ -9,6 +9,7 @@ import pandas as pd
 import PyPDF2
 from fpdf import FPDF
 import re
+from datetime import datetime
 
 app = FastAPI(title="Mega Move AI Backend")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -122,19 +123,45 @@ def generate_next_inquiry_number():
 
 def search_lowest_rate(pol, pod):
     access_token = get_zoho_access_token()
-    url = f"https://www.zohoapis.in/crm/v3/CustomModule1/search?criteria=(((POL:equals:{pol})and(POD:equals:{pod})))"
+    url = f"https://www.zohoapis.in/crm/v3/Pricings/search?criteria=(((POL:equals:{pol})and(POD:equals:{pod})))"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     res = requests.get(url, headers=headers)
     
     if res.status_code == 200 and res.json().get("data"):
         rates = res.json()["data"]
         valid_rates = []
+        today = datetime.now().date()
+        
         for r in rates:
             try:
+                # 1. EXPIRED RATE FILTERING
+                validity_str = r.get("Validity_Date")
+                if validity_str:
+                    try:
+                        validity_date = datetime.strptime(validity_str, "%Y-%m-%d").date()
+                        if validity_date < today:
+                            continue # Skip expired rates
+                    except:
+                        pass # If date format is weird, we keep it but log it or ignore
+                
+                # We need to extract the price from Subform_3 and vehicle from Subform_2
+                # Since search results for Pricings module will contain these subforms
+                sub3 = r.get("Subform_3", [])
+                sub2 = r.get("Subform_2", [])
+                
+                price = 0.0
+                if sub3:
+                    price = float(sub3[0].get("Ex_Work_Charges", 0))
+                
+                vehicle = "Standard"
+                if sub2:
+                    vehicle = sub2[0].get("Vehicle_Types", "Standard")
+
                 valid_rates.append({
-                    "vendor": r.get("Vendor_Name", "Unknown"),
-                    "price": float(r.get("Exwork_Charges", 0)),
-                    "vehicle": r.get("Vehicle_Types", "Standard")
+                    "vendor": sub3[0].get("Vendor_Name", "Unknown") if sub3 else "Unknown",
+                    "price": price,
+                    "vehicle": vehicle,
+                    "validity_date": validity_str or "Unknown"
                 })
             except:
                 pass
@@ -216,6 +243,10 @@ def process_rate_sheet(file_content, filename, vendor_name):
         4. **COMMODITY & HAZ:**
            - If the row/column indicates "HAZ", "Hazardous", or "DG", append "(HAZ)" to the container_type.
 
+        5. **VALIDITY SCAN:**
+           - Scan the document for "Valid until", "Expiry", "Valid till", or dates near the header/footer.
+           - Return it as 'validity_date' in YYYY-MM-DD format. If not found, return null.
+
         ### OUTPUT FORMAT:
         Return ONLY a JSON object with a "rates" key:
         {{
@@ -225,7 +256,7 @@ def process_rate_sheet(file_content, filename, vendor_name):
               "pod": "Destination Port",
               "container_type": "Standardized Type",
               "ocean_freight": 0.0,
-              "validity": "YYYY-MM-DD or descriptive string"
+              "validity_date": "YYYY-MM-DD or null"
             }}
           ]
         }}
@@ -243,7 +274,7 @@ def process_rate_sheet(file_content, filename, vendor_name):
         
         extracted_rates = json.loads(response.choices[0].message.content).get("rates", [])
         
-        # Log to Zoho CRM (CustomModule1 for Rates)
+        # Log to Zoho CRM (Pricings module)
         zoho_data = []
         for rate in extracted_rates:
             price_val = rate.get("ocean_freight", 0.0)
@@ -253,6 +284,7 @@ def process_rate_sheet(file_content, filename, vendor_name):
                 "Name": f"{carrier_name} - {rate.get('pol')} to {rate.get('pod')}",
                 "POL": rate.get("pol"),
                 "POD": rate.get("pod"),
+                "Validity_Date": rate.get("validity_date"),
                 "Subform_3": [
                     {
                         "Vendor_Name": carrier_name,
@@ -346,7 +378,10 @@ def process_email_rfq(payload):
                 margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
                 sell_price = best_rate['price'] * (1 + (margin_pct / 100))
                 pdf_bytes = generate_quotation_pdf(inq_number, pol, pod, best_rate['vehicle'], sell_price)
-                alert_msg += f"\n\n✅ I also found a rate and generated a quotation."
+                
+                validity_info = f"⏳ Valid until: {best_rate.get('validity_date', 'Unknown')}"
+                alert_msg += f"\n\n✅ I also found a rate and generated a quotation.\n{validity_info}"
+                
                 my_number = os.getenv("YOUR_WHATSAPP_NUMBER") 
                 if my_number:
                     upload_and_send_pdf(my_number, pdf_bytes, f"{inq_number}.pdf", alert_msg)
@@ -427,7 +462,8 @@ def process_whatsapp_message(payload):
                     if best_rate:
                         margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
                         sell_price = best_rate['price'] * (1 + (margin_pct / 100))
-                        msg = f"✅ Rate Found for {pol} ➡️ {pod}\n\nPrice: USD {sell_price:.2f}\nEquipment: {best_rate['vehicle']}\nInquiry: {inq_number}"
+                        validity_info = f"⏳ Valid until: {best_rate.get('validity_date', 'Unknown')}"
+                        msg = f"✅ Rate Found for {pol} ➡️ {pod}\n\nPrice: USD {sell_price:.2f}\nEquipment: {best_rate['vehicle']}\nInquiry: {inq_number}\n{validity_info}"
                         send_whatsapp_message(from_number, msg)
                     else:
                         send_whatsapp_message(from_number, f"⚠️ I've logged your inquiry {inq_number}, but I couldn't find an instant rate for {pol} to {pod}.")

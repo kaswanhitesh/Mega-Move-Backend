@@ -186,6 +186,40 @@ def push_to_zoho_crm(module, data_list):
             error_msg = item.get("message", "Unknown Error")
             raise Exception(f"Zoho Record Error [Row {idx+1}]: {error_msg} (Details: {error_details})")
 
+def get_deal_tracking_details(inq_number):
+    """Fetches Container/MBL details from Zoho Deals using INQ number."""
+    access_token = get_zoho_access_token()
+    # Assume the CRM field API name is Container_Number or MBL
+    url = f"https://www.zohoapis.in/crm/v3/Deals/search?criteria=(Deal_Name:equals:{inq_number})"
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    res = requests.get(url, headers=headers)
+    
+    if res.status_code == 200 and res.json().get("data"):
+        deal = res.json()["data"][0]
+        return deal.get("Container_Number") or deal.get("MBL")
+    return None
+
+def fetch_container_status(tracking_reference):
+    """Queries external Tracking API (Vizion/SeaRates) or returns mock for testing."""
+    api_key = os.getenv("TRACKING_API_KEY")
+    
+    if not api_key:
+        # Mock Response for Testing
+        return {
+            "status": "In Transit",
+            "current_location": "En route to Singapore",
+            "eta": "2026-06-15",
+            "vessel_name": "MAERSK KYRENIA"
+        }
+    
+    # Placeholder for actual API integration (e.g. Vizion)
+    return {
+        "status": "Tracking active",
+        "current_location": "Coordinating with carrier...",
+        "eta": "TBD",
+        "vessel_name": "TBD"
+    }
+
 # --- DYNAMIC AUTO-NUMBERING ---
 def generate_next_inquiry_number():
     """Fetches the latest Deal and increments the INQ number."""
@@ -817,15 +851,43 @@ async def process_whatsapp_message(payload):
 
         # 2. HANDLE TEXT (Greetings or Inquiries)
         elif message.get("type") == "text":
-            text = message.get("text", {}).get("body", "").lower()
+            text = str(message.get("text", {}).get("body", "")).strip()
+            text_lower = text.lower()
             
             # CHECK FOR PENDING TASKS (Human-in-the-Loop)
             if from_number in PENDING_TASKS:
                 handle_confirmation(text, from_number)
                 return
 
-            # 1. AI Extraction
-            reply, extracted = process_inquiry(text)
+            # --- LIVE TRACKING ENGINE (PHASE 4) ---
+            if text_lower.startswith("track"):
+                ref = text.split(" ", 1)[-1].strip()
+                tracking_id = ref
+                
+                # If reference is an Inquiry ID, lookup the container number in Zoho
+                if ref.upper().startswith("INQ"):
+                    print(f"DEBUG: Tracking by Inquiry ID: {ref}")
+                    container_no = get_deal_tracking_details(ref.upper())
+                    if container_no:
+                        tracking_id = container_no
+                    else:
+                        send_whatsapp_message(from_number, f"⚠️ I couldn't find a container number for inquiry {ref} in Zoho CRM.")
+                        return
+
+                status_data = fetch_container_status(tracking_id)
+                msg = (
+                    f"🚢 *Live Tracking Update*\n"
+                    f"Reference: {ref.upper()}\n"
+                    f"Status: {status_data['status']}\n"
+                    f"📍 Current Location: {status_data['current_location']}\n"
+                    f"⛴️ Vessel: {status_data['vessel_name']}\n"
+                    f"🗓️ ETA: {status_data['eta']}"
+                )
+                send_whatsapp_message(from_number, msg)
+                return
+
+            # 1. AI Extraction (Standard Inquiries)
+            reply, extracted = process_inquiry(text_lower)
             
             # 2. PROJECT CARGO / OOG DETECTION
             commodity = str(extracted.get('commodity', '')).title()

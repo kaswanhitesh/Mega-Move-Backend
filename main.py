@@ -10,9 +10,44 @@ import PyPDF2
 from fpdf import FPDF
 import re
 from datetime import datetime
+import difflib
 
 app = FastAPI(title="Mega Move AI Backend")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# --- MASTER CONFIGURATION ---
+PORT_ALIASES = {
+    "JNPT": "Nhava Sheva",
+    "INNSA": "Nhava Sheva",
+    "JEA": "Jebel Ali",
+    "AEJEA": "Jebel Ali",
+    "SHA": "Shanghai",
+    "CNSHA": "Shanghai",
+    "NSA": "Nhava Sheva",
+    "MUNDRA": "Mundra",
+    "INMUN": "Mundra",
+    "JEBEL ALI": "Jebel Ali",
+    "DXB": "Dubai",
+    "AEDXB": "Dubai"
+}
+
+def normalize_port_name(raw_name):
+    if not raw_name:
+        return raw_name
+    
+    clean_name = str(raw_name).strip().upper()
+    
+    # 1. Direct Alias Match
+    if clean_name in PORT_ALIASES:
+        return PORT_ALIASES[clean_name]
+    
+    # 2. Fuzzy Match against Values
+    standard_names = list(set(PORT_ALIASES.values()))
+    matches = difflib.get_close_matches(clean_name, standard_names, n=1, cutoff=0.8)
+    if matches:
+        return matches[0]
+        
+    return clean_name.title()
 
 @app.get("/")
 def read_root():
@@ -122,6 +157,8 @@ def generate_next_inquiry_number():
     return f"INQ-MMI-2026-{str(next_num).zfill(3)}"
 
 def search_lowest_rate(pol, pod):
+    pol = normalize_port_name(pol)
+    pod = normalize_port_name(pod)
     access_token = get_zoho_access_token()
     url = f"https://www.zohoapis.in/crm/v3/Pricings/search?criteria=(((POL:equals:{pol})and(POD:equals:{pod})))"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
@@ -279,11 +316,13 @@ def process_rate_sheet(file_content, filename, vendor_name):
         for rate in extracted_rates:
             price_val = rate.get("ocean_freight", 0.0)
             carrier_name = vendor_name  # Using vendor_name as carrier
+            norm_pol = normalize_port_name(rate.get("pol"))
+            norm_pod = normalize_port_name(rate.get("pod"))
             
             zoho_data.append({
-                "Name": f"{carrier_name} - {rate.get('pol')} to {rate.get('pod')}",
-                "POL": rate.get("pol"),
-                "POD": rate.get("pod"),
+                "Name": f"{carrier_name} - {norm_pol} to {norm_pod}",
+                "POL": norm_pol,
+                "POD": norm_pod,
                 "Validity_Date": rate.get("validity_date"),
                 "Subform_3": [
                     {

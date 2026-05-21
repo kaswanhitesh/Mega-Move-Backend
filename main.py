@@ -11,6 +11,7 @@ from fpdf import FPDF
 import re
 from datetime import datetime
 from rapidfuzz import process, fuzz
+import base64
 
 app = FastAPI(title="Mega Move AI Backend")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -306,8 +307,32 @@ def process_inquiry(text):
             return reply, extracted
             
     return None, extracted
-            
-    return None, extracted
+
+def process_image_inquiry(image_bytes):
+    """Analyzes an image using GPT-4o-vision. Returns extracted JSON."""
+    base64_image = base64.b64encode(image_bytes).decode('utf-8')
+    
+    prompt = "Analyze these screenshots. Extract the Shipper Name, POL, POD, Cargo Details (specifically model, qty, and dimensions), and Readiness date. Return the output as a JSON object."
+    
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_image}"
+                        }
+                    }
+                ]
+            }
+        ],
+        response_format={ "type": "json_object" }
+    )
+    return json.loads(response.choices[0].message.content)
 
 def generate_quotation_pdf(inq_number, pol, pod, equipment, sell_price):
     pdf = FPDF()
@@ -655,6 +680,39 @@ def process_whatsapp_message(payload):
             vendor_name = filename.split(" ")[0] if " " in filename else "WhatsApp Vendor"
             status = process_rate_sheet(file_bytes, filename, vendor_name, from_number)
             send_whatsapp_message(from_number, status)
+
+        # 1.1 HANDLE IMAGES (Project Cargo/OOG Enquiries)
+        elif message.get("type") == "image":
+            img = message.get("image")
+            media_id = img.get("id")
+            
+            send_whatsapp_message(from_number, "👁️ *Vision AI:* Analyzing your image for shipment details...")
+            
+            access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
+            media_url_res = requests.get(f"https://graph.facebook.com/v18.0/{media_id}", 
+                                         headers={"Authorization": f"Bearer {access_token}"})
+            media_url = media_url_res.json().get("url")
+            image_bytes = requests.get(media_url, headers={"Authorization": f"Bearer {access_token}"}).content
+            
+            extracted = process_image_inquiry(image_bytes)
+            
+            commodity = extracted.get("commodity") or extracted.get("Cargo Details", "General Cargo")
+            inq_number = generate_next_inquiry_number()
+            
+            enquiry_data = {
+                "Deal_Name": inq_number,
+                "Stage": "Qualification",
+                "Type": "Project Cargo",
+                "Description": f"Vision AI Extracted Inquiry\nShipper: {extracted.get('Shipper Name')}\nRoute: {extracted.get('POL')} to {extracted.get('POD')}\nCargo: {commodity}\nReadiness: {extracted.get('Readiness date')}\nSource: WhatsApp Image"
+            }
+            
+            PENDING_TASKS[from_number] = {
+                'action': 'log_enquiry',
+                'description': f"log this inquiry for {commodity}",
+                'data': enquiry_data
+            }
+            
+            send_whatsapp_message(from_number, f"📊 *Extraction Complete!*\n\nI have parsed the inquiry for {commodity}. It appears to be a Project Cargo lead.\n\nReply *YES* to log this into Zoho CRM.")
 
         # 2. HANDLE TEXT (Greetings or Inquiries)
         elif message.get("type") == "text":

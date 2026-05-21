@@ -1429,51 +1429,34 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
             send_whatsapp_message(from_number, "🛑 No active actions pending to confirm or cancel. Type *help* to see available commands.")
             return
 
-        # --- PERMANENT FIX: PRIORITY RATE CHECK BYPASS ---
-        # This checks for rates BEFORE the AI gets confused and thinks it's an email inquiry
+       # --- PERMANENT FIX: PRIORITY RATE CHECK BYPASS (AI-POWERED) ---
+        # This intercepts rate requests and uses GPT-4 to translate acronyms like JNPT to Nhava Sheva
         if msg_type == "text" and any(k in raw_text.lower() for k in ["rate for", "rates for", "price for", "what is the rate"]):
-            print("DEBUG: Priority rate search phrase detected. Forcing rate check.")
-            rate_match = re.search(r"(?:rate[s]? for|price for|what is the rate for) (.+) [tT]o (.+)", raw_text, re.IGNORECASE)
-            if rate_match:
-                pol_raw = rate_match.group(1).strip().strip("?")
-                pod_raw = rate_match.group(2).strip().strip("?")
-                
-                std_pol = standardize_port_name(pol_raw)
-                std_pod = standardize_port_name(pod_raw)
-                
-                send_whatsapp_message(from_number, f"🔍 *Searching active rates for {std_pol} to {std_pod}...*")
-                
-                rates = search_rates(std_pol, std_pod)
-                if rates:
-                    best_rates_by_type = {}
-                    for r in rates:
-                        v_type = r['vehicle']
-                        if v_type not in best_rates_by_type or r['price'] < best_rates_by_type[v_type]['price']:
-                            best_rates_by_type[v_type] = r
-                    
-                    rates_text = ""
-                    margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
-                    for v_type, rate in best_rates_by_type.items():
-                        sell_price = rate['price'] * (1 + (margin_pct / 100))
-                        rates_text += (
-                            f"📦 *Equipment:* {v_type}\n"
-                            f"💰 *Ocean Freight:* USD {sell_price:.2f}\n"
-                            f"⏱️ *Transit Time:* {rate['transit_time']}\n"
-                            f"🗺️ *Routing:* {rate['route']}\n"
-                            f"⏳ *Valid until:* {rate['validity_date']}\n\n"
-                        )
-                    
-                    msg = (
-                        f"🚢 *Quotation: {std_pol} ➡️ {std_pod}*\n\n"
-                        f"{rates_text}"
-                        f"🏢 *Vendor:* {rates[0]['vendor']}\n"
-                        f"Ref: {generate_next_inquiry_number()}"
-                    )
-                    send_whatsapp_message(from_number, msg)
-                else:
-                    send_whatsapp_message(from_number, f"⚠️ No active rates found for {std_pol} to {std_pod} in Zoho CRM.")
+            print("DEBUG: Priority rate search phrase detected. Routing to AI Pricing Engine.")
+            send_whatsapp_message(from_number, "🔍 *Searching active rates...*")
+            
+            reply, extracted = process_inquiry(raw_text)
+            
+            # Catch Special Project Cargo during rate checks
+            commodity = extracted.get('commodity', 'Unknown').title()
+            if any(k in commodity for k in ["Crane", "Excavator", "Machine", "Oog"]):
+                inq_number = generate_next_inquiry_number()
+                PENDING_TASKS[from_number] = {'action': 'log_enquiry', 'description': f"log this priority OOG inquiry for {commodity}", 'data': {"Deal_Name": inq_number, "Stage": "Qualification", "Type": "Project Cargo", "Description": f"OOG: {commodity}"}}
+                send_whatsapp_message(from_number, "🏗️ I have detected a Project Cargo inquiry. Shall I log this and notify the pricing team? (Reply YES)")
                 return
 
+            # Output the Standard Quotation or the Error
+            if reply:
+                send_whatsapp_message(from_number, reply)
+            else:
+                pol = extracted.get('pol', 'Unknown')
+                pod = extracted.get('pod', 'Unknown')
+                if pol != 'Unknown' and pod != 'Unknown':
+                    send_whatsapp_message(from_number, f"⚠️ No active rates found for {pol} to {pod} in Zoho CRM.")
+                else:
+                    send_whatsapp_message(from_number, "🤖 I couldn't identify specific loading and discharge ports in your request.")
+            return
+            
         # 2. COGNITIVE CLASSIFICATION (Runs only if the text is not a rate check or a Yes/No)
         classification = await classify_operational_intent(raw_text if msg_type == "text" else "", caption, raw_text)
         category = classification.get('category')

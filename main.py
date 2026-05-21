@@ -339,6 +339,64 @@ def process_image_inquiry(image_bytes_list):
     )
     return json.loads(response.choices[0].message.content)
 
+def classify_pdf_content(raw_data):
+    """Classifies the document type using GPT-4o."""
+    prompt = "Classify this document as either 'VENDOR_RATE_SHEET' or 'INQUIRY_EMAIL'. Return only the keyword."
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": f"{prompt}\n\nDATA:\n{raw_data[:5000]}"}]
+    )
+    classification = response.choices[0].message.content.strip().upper()
+    return classification
+
+def process_inquiry_email(raw_data, wa_id=None):
+    """Parses inquiry details from a document and logs to Zoho 'New Enquiries'."""
+    try:
+        prompt = """
+        ACT AS AN EXPERT LOGISTICS PARSER.
+        Extract the following details from this inquiry document:
+        - Shipper Name
+        - POL (Port of Loading)
+        - POD (Port of Discharge)
+        - Cargo Specifications (specifically mention if Cranes, dimensions, weight)
+        - Incoterms
+        
+        Return ONLY valid JSON.
+        """
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "system", "content": "You are a precise logistics parser. Output only valid JSON."},
+                      {"role": "user", "content": f"{prompt}\n\nDATA:\n{raw_data[:10000]}"}],
+            response_format={ "type": "json_object" }
+        )
+        extracted = json.loads(response.choices[0].message.content)
+        
+        # Log to Zoho CRM (New Enquiries module)
+        inq_number = generate_next_inquiry_number()
+        enquiry_data = {
+            "Deal_Name": inq_number,
+            "Stage": "Qualification",
+            "Description": f"PDF Inquiry Extracted\nShipper: {extracted.get('Shipper Name')}\nRoute: {extracted.get('POL')} to {extracted.get('POD')}\nSpecs: {extracted.get('Cargo Specifications')}\nIncoterms: {extracted.get('Incoterms')}\nSource: PDF Document"
+        }
+        
+        if wa_id:
+            PENDING_TASKS[wa_id] = {
+                'action': 'log_enquiry',
+                'description': f"log an enquiry for {extracted.get('POL')} to {extracted.get('POD')}",
+                'module': 'New Enquiries',
+                'data': enquiry_data
+            }
+            summary = f"📊 *Inquiry Parsed!*\n\nShipper: {extracted.get('Shipper Name')}\nRoute: {extracted.get('POL')} to {extracted.get('POD')}\n\nReply *YES* to log this as a New Enquiry in Zoho CRM."
+            send_whatsapp_message(wa_id, summary)
+            return summary
+            
+        return "Inquiry processed successfully."
+    except Exception as e:
+        print(f"CRITICAL ERROR (Inquiry PDF): {e}")
+        if wa_id:
+            send_whatsapp_message(wa_id, f"❌ *Error parsing inquiry:* {str(e)}")
+        return f"Error processing inquiry: {e}"
+
 def generate_quotation_pdf(inq_number, pol, pod, equipment, sell_price):
     pdf = FPDF()
     pdf.add_page()
@@ -375,7 +433,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
     """Parses Excel/PDF rate sheets using a calibrated GPT-4o prompt."""
     try:
         if wa_id:
-            send_whatsapp_message(wa_id, "📥 *Received your rate sheet.* Reading the document...")
+            send_whatsapp_message(wa_id, "📥 *Received document.* Analyzing content...")
 
         # Extract text/data from file
         if filename.endswith(".xlsx") or filename.endswith(".xls"):
@@ -387,6 +445,16 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
             pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
             raw_data = "".join([page.extract_text() for page in pdf_reader.pages])
 
+        # 1. CLASSIFICATION LAYER
+        doc_type = classify_pdf_content(raw_data)
+        print(f"DEBUG: Document classified as {doc_type}")
+        
+        if doc_type == 'INQUIRY_EMAIL':
+            if wa_id:
+                send_whatsapp_message(wa_id, "🔍 *Detected:* Inquiry Email. Processing as lead...")
+            return process_inquiry_email(raw_data, wa_id)
+
+        # 2. CONTINUING AS VENDOR_RATE_SHEET
         # UNIVERSAL PARSING PROMPT - CALIBRATED FOR COMPLEX LOGISTICS EDGE CASES
         prompt = f"""
         ACT AS AN EXPERT LOGISTICS DATA ENGINEER. 
@@ -541,9 +609,10 @@ def handle_confirmation(text, sender_wa_id):
                 send_whatsapp_message(sender_wa_id, f"❌ *Error during upload:* {str(e)}")
         
         elif action == 'log_enquiry':
-            send_whatsapp_message(sender_wa_id, "🚀 *Confirmed.* Logging your enquiry in Zoho CRM...")
+            module = task.get('module', 'Deals')
+            send_whatsapp_message(sender_wa_id, f"🚀 *Confirmed.* Logging your enquiry in Zoho CRM ({module})...")
             try:
-                push_to_zoho_crm("Deals", [data])
+                push_to_zoho_crm(module, [data])
                 send_whatsapp_message(sender_wa_id, "✅ *Success!* Your enquiry has been logged. Our team will contact you shortly.")
             except Exception as e:
                 print(f"CRITICAL ERROR: {str(e)}")

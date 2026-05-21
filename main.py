@@ -197,10 +197,14 @@ def generate_next_inquiry_number():
     return f"INQ-MMI-2026-{str(next_num).zfill(3)}"
 
 def search_lowest_rate(pol, pod):
-    pol = normalize_port_name(pol)
-    pod = normalize_port_name(pod)
+    normalized_pol = normalize_port_name(pol)
+    normalized_pod = normalize_port_name(pod)
+    
+    print(f"DEBUG: Searching Zoho for POL={normalized_pol}, POD={normalized_pod}")
+    
     access_token = get_zoho_access_token()
-    url = f"https://www.zohoapis.in/crm/v3/Pricings/search?criteria=(((POL:equals:{pol})and(POD:equals:{pod})))"
+    # Using starts_with for more flexible matching (API allows minor naming variations)
+    url = f"https://www.zohoapis.in/crm/v3/Pricings/search?criteria=(((POL:starts_with:{normalized_pol})and(POD:starts_with:{normalized_pod})))"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     res = requests.get(url, headers=headers)
     

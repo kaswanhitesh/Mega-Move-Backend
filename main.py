@@ -179,6 +179,50 @@ def extract_numeric_price(price_val):
     except:
         return float('inf')
 
+def normalize_port_name(raw_port):
+    """Standardizes port names using the UN/LOCODE global database and RapidFuzz."""
+    if not raw_port:
+        return raw_port
+    
+    # STEP 1: NORMALIZATION PIPELINE
+    name = str(raw_port).upper()
+    name = re.sub(r'[,/]', ' ', name)
+    noise_words = ["PORT", "TERMINAL", "WHARF", "CHINA", "INDIA", "UAE"]
+    for word in noise_words:
+        name = re.sub(rf'\b{word}\b', '', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+
+    if not name:
+        return raw_port.title().strip()
+
+    # --- PERMANENT FIX: HARDCODED ACRONYM SAFETY NET ---
+    common_aliases = {
+        "JNPT": "Nhava Sheva",
+        "JNP": "Nhava Sheva",
+        "NSICT": "Nhava Sheva",
+        "NSIGT": "Nhava Sheva",
+        "GTI": "Nhava Sheva",
+        "BMCT": "Nhava Sheva",
+        "JEA": "Jebel Ali",
+        "JED": "Jebel Ali",
+        "SIN": "Singapore",
+        "PKG": "Port Klang"
+    }
+    if name in common_aliases:
+        return common_aliases[name]
+
+    # STEP 2: RAPIDFUZZ MATCHING AGAINST GLOBAL DATABASE
+    if GLOBAL_PORT_ALIASES:
+        # Match against values (port names)
+        port_names = [v[0] for v in GLOBAL_PORT_ALIASES.values()]
+        result = process.extractOne(name, port_names, scorer=fuzz.token_sort_ratio)
+        
+        if result:
+            matched_name, score, _ = result
+            if score >= 85:
+                return matched_name.title()
+
+    return name.title()
 def standardize_port_name(raw_port):
     """Standardizes port names using the UN/LOCODE global database and RapidFuzz."""
     if not raw_port:
@@ -202,7 +246,7 @@ def standardize_port_name(raw_port):
         "NSICT": "Nhava Sheva",
         "NSIGT": "Nhava Sheva",
         "GTI": "Nhava Sheva",
-        "BMCT": "Nhava Sheva"
+        "BMCT": "Nhava Sheva",
         "JEA": "Jebel Ali",
         "JED": "Jebel Ali",
         "SIN": "Singapore",
@@ -223,9 +267,6 @@ def standardize_port_name(raw_port):
                 return matched_name.title()
 
     return name.title()
-def normalize_port_name(raw_name):
-    # Wrapper for backward compatibility
-    return standardize_port_name(raw_name)
 
 @app.get("/")
 def read_root():
@@ -838,7 +879,7 @@ def process_inquiry(text):
     response = client.chat.completions.create(
         
         model="gpt-4o",
-        messages=[{"role": "user", "content": content}],
+        messages=[{"role": "user", "content": prompt}],
         response_format={ "type": "json_object" }
     )
     return json.loads(response.choices[0].message.content)

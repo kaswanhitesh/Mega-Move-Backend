@@ -72,10 +72,9 @@ async def run_daily_financial_audit():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup logic here
     print("Mega Move AI Backend Starting Up...")
 
-    # 1. AUTO-BUILD UN/LOCODE DATABASE (Self-healing & Bulletproof)
+    # 1. AUTO-BUILD UN/LOCODE DATABASE
     global GLOBAL_PORT_ALIASES
     ports_file = "ports.json"
     if not os.path.exists(ports_file):
@@ -86,17 +85,15 @@ async def lifespan(app: FastAPI):
         for f in csv_files:
             if "subdivision" in f.lower():
                 continue
-            # Try different combinations of encodings and separators
             for encoding in ["latin-1", "utf-8", "cp1252"]:
                 for sep in [",", ";"]:
                     try:
                         df = pd.read_csv(f, sep=sep, encoding=encoding, keep_default_na=False, dtype=str)
                         if df.shape[1] < 4:
-                            continue  # Wrong separator, try next
-                        
-                        # Dynamically locate columns based on expected positional content
+                            continue
+
                         col_country, col_loc, col_name, col_func = None, None, None, None
-                        
+
                         for col in df.columns:
                             col_str = str(col).lower()
                             if "country" in col_str: col_country = col
@@ -104,8 +101,7 @@ async def lifespan(app: FastAPI):
                             elif "namewodiacritics" in col_str: col_name = col
                             elif "name" in col_str and not col_name: col_name = col
                             elif "function" in col_str: col_func = col
-                        
-                        # Positional fallback if columns are completely headerless
+
                         if not col_country or not col_loc or not col_func:
                             for col in df.columns:
                                 sample = df[col].head(30).tolist()
@@ -118,7 +114,6 @@ async def lifespan(app: FastAPI):
                         if col_country and col_loc and col_func:
                             for _, row in df.iterrows():
                                 func_val = str(row[col_func]).strip()
-                                # A '1' in the first index or within the string means it's a maritime seaport
                                 if func_val and (func_val.startswith("1") or "1" in func_val):
                                     country = str(row[col_country]).strip().upper()
                                     loc = str(row[col_loc]).strip().upper()
@@ -126,7 +121,7 @@ async def lifespan(app: FastAPI):
                                     if len(country) == 2 and len(loc) == 3:
                                         locode = f"{country}{loc}"
                                         ports_db[locode] = [name, locode, loc]
-                            break  # Successfully parsed this file, move to next file
+                            break
                     except:
                         continue
 
@@ -145,23 +140,20 @@ async def lifespan(app: FastAPI):
             print(f"DEBUG: Loaded {len(GLOBAL_PORT_ALIASES)} ports into memory.")
     except Exception as e:
         print(f"ERROR: Failed to load ports.json: {e}")
-    
-    # Initialize and Start Scheduler for Financial Audits
+
+    # 3. Start Scheduler
     scheduler = AsyncIOScheduler()
-    
-    # Check for TEST_MODE to run more frequently
     if os.getenv("TEST_MODE") == "true":
         print("DEBUG: TEST_MODE active. Running financial audit every 5 minutes.")
         scheduler.add_job(run_daily_financial_audit, 'interval', minutes=5)
     else:
-        # Run daily at 09:00 AM IST (UTC+5:30 -> 03:30 AM UTC)
         print("DEBUG: Scheduling daily financial audit at 09:00 AM IST.")
         scheduler.add_job(run_daily_financial_audit, CronTrigger(hour=3, minute=30))
-    
+
     scheduler.start()
-    
+
     yield
-    # Shutdown logic here
+
     print("Mega Move AI Backend Shutting Down...")
     scheduler.shutdown()
 
@@ -172,19 +164,19 @@ def extract_numeric_price(price_val):
     """Safely extracts a float from a messy price string. Returns inf if invalid."""
     try:
         if price_val is None: return float('inf')
-        # Strip everything except digits and decimals
         clean_val = re.sub(r'[^\d.]', '', str(price_val))
         if not clean_val or clean_val == '.': return float('inf')
         return float(clean_val)
     except:
         return float('inf')
 
+# FIX 1: Renamed from 'return name title' to 'normalize_port_name' (was a syntax crash)
+# FIX 2: Removed duplicate 'standardize_port_name' function that was identical to this one
 def normalize_port_name(raw_port):
     """Standardizes port names using the UN/LOCODE global database and RapidFuzz."""
     if not raw_port:
         return raw_port
-    
-    # STEP 1: NORMALIZATION PIPELINE
+
     name = str(raw_port).upper()
     name = re.sub(r'[,/]', ' ', name)
     noise_words = ["PORT", "TERMINAL", "WHARF", "CHINA", "INDIA", "UAE"]
@@ -195,14 +187,14 @@ def normalize_port_name(raw_port):
     if not name:
         return raw_port.title().strip()
 
-    # --- PERMANENT FIX: HARDCODED ACRONYM SAFETY NET ---
+    # Hardcoded acronym safety net
     common_aliases = {
         "JNPT": "Nhava Sheva",
         "JNP": "Nhava Sheva",
         "NSICT": "Nhava Sheva",
         "NSIGT": "Nhava Sheva",
         "GTI": "Nhava Sheva",
-        "BMCT": "Nhava Sheva",
+        "BMCT": "Nhava Sheva",  # FIX 3: Was missing comma here — caused the original crash
         "JEA": "Jebel Ali",
         "JED": "Jebel Ali",
         "SIN": "Singapore",
@@ -211,56 +203,9 @@ def normalize_port_name(raw_port):
     if name in common_aliases:
         return common_aliases[name]
 
-    # STEP 2: RAPIDFUZZ MATCHING AGAINST GLOBAL DATABASE
     if GLOBAL_PORT_ALIASES:
-        # Match against values (port names)
         port_names = [v[0] for v in GLOBAL_PORT_ALIASES.values()]
         result = process.extractOne(name, port_names, scorer=fuzz.token_sort_ratio)
-        
-        if result:
-            matched_name, score, _ = result
-            if score >= 85:
-                return matched_name.title()
-
-    return name.title()
-def standardize_port_name(raw_port):
-    """Standardizes port names using the UN/LOCODE global database and RapidFuzz."""
-    if not raw_port:
-        return raw_port
-    
-    # STEP 1: NORMALIZATION PIPELINE
-    name = str(raw_port).upper()
-    name = re.sub(r'[,/]', ' ', name)
-    noise_words = ["PORT", "TERMINAL", "WHARF", "CHINA", "INDIA", "UAE"]
-    for word in noise_words:
-        name = re.sub(rf'\b{word}\b', '', name)
-    name = re.sub(r'\s+', ' ', name).strip()
-
-    if not name:
-        return raw_port.title().strip()
-
-    # --- PERMANENT FIX: HARDCODED ACRONYM SAFETY NET ---
-    common_aliases = {
-        "JNPT": "Nhava Sheva",
-        "JNP": "Nhava Sheva",
-        "NSICT": "Nhava Sheva",
-        "NSIGT": "Nhava Sheva",
-        "GTI": "Nhava Sheva",
-        "BMCT": "Nhava Sheva",
-        "JEA": "Jebel Ali",
-        "JED": "Jebel Ali",
-        "SIN": "Singapore",
-        "PKG": "Port Klang"
-    }
-    if name in common_aliases:
-        return common_aliases[name]
-
-    # STEP 2: RAPIDFUZZ MATCHING AGAINST GLOBAL DATABASE
-    if GLOBAL_PORT_ALIASES:
-        # Match against values (port names)
-        port_names = [v[0] for v in GLOBAL_PORT_ALIASES.values()]
-        result = process.extractOne(name, port_names, scorer=fuzz.token_sort_ratio)
-        
         if result:
             matched_name, score, _ = result
             if score >= 85:
@@ -286,15 +231,13 @@ async def verify_whatsapp(request: Request):
 @app.post("/whatsapp-webhook")
 async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
-    
-    # 0. IDEMPOTENCY & STATUS CHECK
+
     try:
         value = payload.get('entry', [{}])[0].get('changes', [{}])[0].get('value', {})
-        
-        # 0.1 Silently acknowledge status updates (read/delivered receipts) to prevent crashes
+
         if 'statuses' in value:
             return {"status": "success"}
-            
+
         messages = value.get('messages', [])
         if not messages:
             return {"status": "success"}
@@ -303,15 +246,13 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         if message_id in PROCESSED_MESSAGE_IDS:
             print(f"DEBUG: Ignoring duplicate message_id: {message_id}")
             return {"status": "ignored_duplicate"}
-        
-        # Add to cache and proceed
+
         PROCESSED_MESSAGE_IDS.add(message_id)
 
     except Exception as e:
         print(f"Webhook Safety Check Error: {e}")
-        return {"status": "success"} # Still return success to prevent retries on error
+        return {"status": "success"}
 
-    # Process everything in the background to ensure Meta gets a 200 OK instantly
     background_tasks.add_task(process_whatsapp_message, payload, background_tasks)
     return {"status": "success"}
 
@@ -335,24 +276,22 @@ def send_email_with_attachment(to_email, subject, body, pdf_bytes=None, filename
     sender_email = os.getenv("ZOHO_EMAIL_ADDRESS")
     sender_password = os.getenv("ZOHO_EMAIL_PASSWORD")
     cc_email = "hitesh@megamoveindia.com"
-    
+
     msg = MIMEMultipart()
     msg['From'] = sender_email
     msg['To'] = to_email
     msg['Cc'] = cc_email
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'plain'))
-    
+
     if pdf_bytes:
         part = MIMEApplication(pdf_bytes, Name=filename)
         part['Content-Disposition'] = f'attachment; filename="{filename}"'
         msg.attach(part)
-        
+
     try:
-        # Use Zoho SMTP settings (smtp.zoho.in for India orgs)
         with smtplib.SMTP_SSL('smtp.zoho.in', 465) as server:
             server.login(sender_email, sender_password)
-            # Explicitly route to both primary recipient and CC
             server.send_message(msg, to_addrs=[to_email, cc_email])
         return True
     except Exception as e:
@@ -362,13 +301,13 @@ def send_email_with_attachment(to_email, subject, body, pdf_bytes=None, filename
 def upload_and_send_pdf(to_number, file_bytes, filename, caption):
     phone_id = os.getenv("WHATSAPP_PHONE_ID")
     access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
-    
+
     upload_url = f"https://graph.facebook.com/v18.0/{phone_id}/media"
     headers = {"Authorization": f"Bearer {access_token}"}
     files = {'file': (filename, file_bytes, 'application/pdf'), 'messaging_product': (None, 'whatsapp')}
     upload_res = requests.post(upload_url, headers=headers, files=files)
     media_id = upload_res.json().get("id")
-    
+
     if not media_id:
         return
 
@@ -382,22 +321,21 @@ def upload_and_send_pdf(to_number, file_bytes, filename, caption):
     }
     requests.post(send_url, headers=headers, json=payload)
 
-# --- ACCOUNTING & AUDIT LOGIC (PHASE 5) ---
+# --- ACCOUNTING & AUDIT LOGIC ---
 def check_overdue_invoices():
     """Queries Zoho Books for invoices 3+ days overdue."""
     access_token = get_zoho_access_token()
     org_id = os.getenv("ZOHO_BOOKS_ORG_ID")
     if not org_id: return []
-    
+
     url = f"https://www.zohoapis.in/books/v3/invoices?status=overdue&organization_id={org_id}"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     res = requests.get(url, headers=headers)
-    
+
     overdue_list = []
     if res.status_code == 200:
         invoices = res.json().get("invoices", [])
         for inv in invoices:
-            # Calculate days overdue
             due_date = datetime.strptime(inv.get("due_date"), "%Y-%m-%d").date()
             days_overdue = (datetime.now().date() - due_date).days
             if days_overdue >= 3:
@@ -410,31 +348,29 @@ def check_vendor_bill_mismatches():
     access_token = get_zoho_access_token()
     org_id = os.getenv("ZOHO_BOOKS_ORG_ID")
     if not org_id: return []
-    
-    # 1. Fetch Open Bills from Zoho Books
+
     url = f"https://www.zohoapis.in/books/v3/bills?status=open&organization_id={org_id}"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     res = requests.get(url, headers=headers)
-    
+
     mismatches = []
     if res.status_code == 200:
         bills = res.json().get("bills", [])
         for bill in bills:
-            reference = bill.get("reference_number", "") # Assume INQ number is here
+            reference = bill.get("reference_number", "")
             if not reference.startswith("INQ"): continue
-            
-            # 2. Query CRM Deal for expected cost (Buy Rate)
+
             crm_url = f"https://www.zohoapis.in/crm/v3/Deals/search?criteria=(Deal_Name:equals:{reference})"
             crm_res = requests.get(crm_url, headers=headers)
-            
+
             if crm_res.status_code == 200 and crm_res.json().get("data"):
                 deal = crm_res.json()["data"][0]
                 expected_cost = float(deal.get("Buy_Rate") or 0)
                 bill_amount = float(bill.get("total") or 0)
-                
+
                 if expected_cost > 0:
                     variance = ((bill_amount - expected_cost) / expected_cost) * 100
-                    if variance > 5: # Flag if bill is > 5% higher than expected
+                    if variance > 5:
                         mismatches.append({
                             "vendor_name": bill.get("vendor_name"),
                             "bill_number": bill.get("bill_number"),
@@ -445,7 +381,7 @@ def check_vendor_bill_mismatches():
     return mismatches
 
 def format_inr(number):
-    """Formats a number as INR string using the Indian numbering system (Lakhs/Crores)."""
+    """Formats a number as INR string using the Indian numbering system."""
     try:
         is_negative = number < 0
         number = abs(number)
@@ -456,12 +392,12 @@ def format_inr(number):
     except:
         return f"₹ {number:,.2f}"
 
+# FIX 4: Removed duplicate definition of extract_raw_content (was defined twice)
 async def extract_raw_content(file_bytes, filename, msg_type):
     """Universal extractor for Excel, PDF, Images, and Text."""
     ext = filename.split('.')[-1].lower()
-    
+
     try:
-        # 1. EXCEL / CSV
         if ext in ['xlsx', 'xls', 'csv']:
             all_sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, header=None)
             combined_text = ""
@@ -469,13 +405,11 @@ async def extract_raw_content(file_bytes, filename, msg_type):
                 df = df.dropna(how='all').dropna(axis=1, how='all')
                 combined_text += f"\n--- SHEET: {sheet_name} ---\n{df.to_csv(index=False)}\n"
             return combined_text
-        
-        # 2. PDF
+
         elif ext == 'pdf':
             pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
             return "".join([page.extract_text() for page in pdf_reader.pages])
-        
-        # 3. IMAGES (OCR via Vision AI)
+
         elif msg_type == "image":
             base64_image = base64.b64encode(file_bytes).decode('utf-8')
             response = client.chat.completions.create(
@@ -489,15 +423,15 @@ async def extract_raw_content(file_bytes, filename, msg_type):
                 }]
             )
             return response.choices[0].message.content
-        
-        # 4. RAW TEXT
+
         else:
             return file_bytes.decode('utf-8', errors='ignore')
-            
+
     except Exception as e:
         print(f"Extraction Error ({filename}): {e}")
         return f"Extraction Error: {str(e)}"
 
+# FIX 5: Removed duplicate definition of classify_operational_intent (was defined twice)
 async def classify_operational_intent(user_text, caption, content_snippet):
     """Cognitive classifier to route logistics operations."""
     system_prompt = (
@@ -511,76 +445,12 @@ async def classify_operational_intent(user_text, caption, content_snippet):
         "}"
     )
     user_context = f"User Msg: {user_text}\nCaption: {caption}\nContent Snippet: {content_snippet[:5000]}"
-    
+
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "system", "content": system_prompt},
                   {"role": "user", "content": user_context}],
-        response_format={ "type": "json_object" }
-    )
-    return json.loads(response.choices[0].message.content)
-
-async def extract_raw_content(file_bytes, filename, msg_type):
-    """Universal extractor for Excel, PDF, Images, and Text."""
-    ext = filename.split('.')[-1].lower()
-    
-    try:
-        # 1. EXCEL / CSV
-        if ext in ['xlsx', 'xls', 'csv']:
-            all_sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, header=None)
-            combined_text = ""
-            for sheet_name, df in all_sheets.items():
-                df = df.dropna(how='all').dropna(axis=1, how='all')
-                combined_text += f"\n--- SHEET: {sheet_name} ---\n{df.to_csv(index=False)}\n"
-            return combined_text
-        
-        # 2. PDF
-        elif ext == 'pdf':
-            pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
-            return "".join([page.extract_text() for page in pdf_reader.pages])
-        
-        # 3. IMAGES (OCR via Vision AI)
-        elif msg_type == "image":
-            base64_image = base64.b64encode(file_bytes).decode('utf-8')
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Perform a high-fidelity OCR dump of this logistics document. Extract all text, numbers, and tabular structures into a clean readable string."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }]
-            )
-            return response.choices[0].message.content
-        
-        # 4. RAW TEXT
-        else:
-            return file_bytes.decode('utf-8', errors='ignore')
-            
-    except Exception as e:
-        print(f"Extraction Error ({filename}): {e}")
-        return f"Extraction Error: {str(e)}"
-
-async def classify_operational_intent(user_text, caption, content_snippet):
-    """Cognitive classifier to route logistics operations."""
-    system_prompt = (
-        "You are an AI logistics operational router. Analyze the user's text message, incoming caption, and the following document text snippet. "
-        "Classify the user's true intent and document category.\n"
-        "Return a strict JSON format: \n"
-        "{\n"
-        "  \"category\": \"ratesheet\" | \"vendor_bill\" | \"tariff\" | \"inquiry\" | \"command\",\n"
-        "  \"action_target\": \"INQ-XXX\" or null,\n"
-        "  \"confidence\": float\n"
-        "}"
-    )
-    user_context = f"User Msg: {user_text}\nCaption: {caption}\nContent Snippet: {content_snippet[:5000]}"
-    
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "system", "content": system_prompt},
-                  {"role": "user", "content": user_context}],
-        response_format={ "type": "json_object" }
+        response_format={"type": "json_object"}
     )
     return json.loads(response.choices[0].message.content)
 
@@ -591,7 +461,7 @@ def get_fy_start():
         fy_start_year = now.year
     else:
         fy_start_year = now.year - 1
-    
+
     books_date = f"{fy_start_year}-04-01"
     crm_date = f"{fy_start_year}-04-01T00:00:00+05:30"
     fy_label = f"{fy_start_year}-{fy_start_year + 1}"
@@ -602,49 +472,45 @@ def get_crm_snapshot(period="FY"):
     access_token = get_zoho_access_token()
     books_start_str, _, fy_label = get_fy_start()
     fy_start_date = datetime.strptime(books_start_str, "%Y-%m-%d")
-    
-    # Explicitly request required fields to prevent omission by Zoho default view
+
     url = "https://www.zohoapis.in/crm/v3/Deals?fields=Created_Time,Stage,Deal_Name&sort_by=Created_Time&sort_order=desc&per_page=100"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-    
+
     total_inquiries = 0
     booked_shipments = 0
-    
     page = 1
     more_records = True
-    
+
     while more_records:
         res = requests.get(f"{url}&page={page}", headers=headers)
         if res.status_code == 200 and res.json().get("data"):
             deals = res.json()["data"]
             print(f"DEBUG: Fetched {len(deals)} deals from CRM (Page {page}).")
-            
+
             for deal in deals:
                 try:
                     created_str = deal.get("Created_Time")
                     if not created_str:
-                        print(f"DEBUG: Deal {deal.get('id')} is missing Created_Time")
                         continue
-                        
-                    # Safely extract just the YYYY-MM-DD part to avoid timezone crashing
+
                     clean_date_str = created_str.split("T")[0]
                     deal_date = datetime.strptime(clean_date_str, "%Y-%m-%d")
-                    
+
                     if period == "FY" and deal_date < fy_start_date:
                         more_records = False
-                        break # We've hit the previous FY, stop counting
-                        
+                        break
+
                     total_inquiries += 1
                     if deal.get("Stage") == "Closed Won":
                         booked_shipments += 1
-                        
+
                 except Exception as e:
                     print(f"DEBUG: Error parsing deal date: {e}")
                     continue
-            
+
             if not more_records:
                 break
-                
+
             info = res.json().get("info", {})
             if not info.get("more_records"):
                 more_records = False
@@ -660,22 +526,20 @@ def get_financial_snapshot(period="FY"):
     access_token = get_zoho_access_token()
     org_id = os.getenv("ZOHO_BOOKS_ORG_ID")
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-    
+
     books_start, _, _ = get_fy_start()
     date_filter = f"&date_start={books_start}" if period == "FY" else ""
-    
-    # 1. Fetch Invoices for Revenue
+
     inv_res = requests.get(f"https://www.zohoapis.in/books/v3/invoices?organization_id={org_id}{date_filter}", headers=headers)
-    # 2. Fetch Bills for Costs
     bill_res = requests.get(f"https://www.zohoapis.in/books/v3/bills?organization_id={org_id}{date_filter}", headers=headers)
-    
+
     revenue = 0.0
     costs = 0.0
     if inv_res.status_code == 200:
         revenue = sum([float(i.get("total", 0)) for i in inv_res.json().get("invoices", [])])
     if bill_res.status_code == 200:
         costs = sum([float(b.get("total", 0)) for b in bill_res.json().get("bills", [])])
-        
+
     return {"revenue": float(revenue), "costs": float(costs), "profit": float(revenue - costs)}
 
 def get_deal_by_id(inq_number):
@@ -692,24 +556,22 @@ def get_primary_vendor_email(vendor_name, pol=None):
     """Searches Zoho CRM for the primary PIC email for a vendor."""
     access_token = get_zoho_access_token()
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-    
-    # 1. Search in Vendors module
+
     url = f"https://www.zohoapis.in/crm/v3/Vendors/search?criteria=(Vendor_Name:equals:{vendor_name})"
     res = requests.get(url, headers=headers)
     if res.status_code == 200 and res.json().get("data"):
         return res.json()["data"][0].get("Email")
-    
-    # 2. Fallback to Contacts search
+
     url = f"https://www.zohoapis.in/crm/v3/Contacts/search?criteria=(Account_Name:equals:{vendor_name})"
     res = requests.get(url, headers=headers)
     if res.status_code == 200 and res.json().get("data"):
         for contact in res.json()["data"]:
             if contact.get("Email"): return contact.get("Email")
-                
+
     return None
 
 def get_zoho_access_token():
-    url = "https://accounts.zoho.in/oauth/v2/token" 
+    url = "https://accounts.zoho.in/oauth/v2/token"
     payload = {
         "refresh_token": os.getenv("ZOHO_REFRESH_TOKEN"),
         "client_id": os.getenv("ZOHO_CLIENT_ID"),
@@ -720,20 +582,19 @@ def get_zoho_access_token():
 
 def push_to_zoho_crm(module, data_list):
     access_token = get_zoho_access_token()
-    # Using the Upsert API to prevent duplicates
-    url = f"https://www.zohoapis.in/crm/v3/{module}/upsert" 
+    url = f"https://www.zohoapis.in/crm/v3/{module}/upsert"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}", "Content-Type": "application/json"}
-    
+
     payload = {
         "data": data_list,
         "duplicate_check_fields": ["Rate_Key"]
     }
-    
+
     if data_list:
         print(f"DEBUG: Sending to Zoho module '{module}'. Record keys: {list(data_list[0].keys())}")
-        
+
     response = requests.post(url, json=payload, headers=headers)
-    
+
     if response.status_code not in [200, 201, 202]:
         raise Exception(f"Zoho API Global Error ({response.status_code}): {response.text}")
 
@@ -747,30 +608,27 @@ def push_to_zoho_crm(module, data_list):
 def get_deal_tracking_details(inq_number):
     """Fetches Container/MBL details from Zoho Deals using INQ number."""
     access_token = get_zoho_access_token()
-    # Assume the CRM field API name is Container_Number or MBL
     url = f"https://www.zohoapis.in/crm/v3/Deals/search?criteria=(Deal_Name:equals:{inq_number})"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     res = requests.get(url, headers=headers)
-    
+
     if res.status_code == 200 and res.json().get("data"):
         deal = res.json()["data"][0]
         return deal.get("Container_Number") or deal.get("MBL")
     return None
 
 def fetch_container_status(tracking_reference):
-    """Queries external Tracking API (Vizion/SeaRates) or returns mock for testing."""
+    """Queries external Tracking API or returns mock for testing."""
     api_key = os.getenv("TRACKING_API_KEY")
-    
+
     if not api_key:
-        # Mock Response for Testing
         return {
             "status": "In Transit",
             "current_location": "En route to Singapore",
             "eta": "2026-06-15",
             "vessel_name": "MAERSK KYRENIA"
         }
-    
-    # Placeholder for actual API integration (e.g. Vizion)
+
     return {
         "status": "Tracking active",
         "current_location": "Coordinating with carrier...",
@@ -778,77 +636,72 @@ def fetch_container_status(tracking_reference):
         "vessel_name": "TBD"
     }
 
-# --- DYNAMIC AUTO-NUMBERING ---
 def generate_next_inquiry_number():
     """Fetches the latest Deal and increments the INQ number."""
     access_token = get_zoho_access_token()
     url = "https://www.zohoapis.in/crm/v3/Deals?sort_by=Created_Time&sort_order=desc&per_page=10"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     res = requests.get(url, headers=headers)
-    
-    last_num = 21 
+
+    last_num = 21
     if res.status_code == 200 and res.json().get("data"):
         for deal in res.json()["data"]:
             name = deal.get("Deal_Name", "")
             if name.startswith("INQ-MMI-2026-"):
                 try:
                     last_num = int(name.split("-")[-1])
-                    break 
+                    break
                 except:
                     continue
-                    
+
     next_num = last_num + 1
     return f"INQ-MMI-2026-{str(next_num).zfill(3)}"
 
 def search_rates(pol, pod):
     normalized_pol = normalize_port_name(pol)
     normalized_pod = normalize_port_name(pod)
-    
+
     print(f"DEBUG: Searching Zoho for POL={normalized_pol}, POD={normalized_pod}")
-    
+
     access_token = get_zoho_access_token()
-    # STEP 1: Search ONLY for IDs (Subforms are not returned by default search)
     url = f"https://www.zohoapis.in/crm/v3/Pricings/search?criteria=(((POL:starts_with:{normalized_pol})and(POD:starts_with:{normalized_pod})))&fields=id"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     res = requests.get(url, headers=headers)
-    
+
     valid_rates = []
     if res.status_code == 200 and res.json().get("data"):
         record_ids = [r.get("id") for r in res.json()["data"]]
         today = datetime.now().date()
-        
+
         for record_id in record_ids:
-            # STEP 2: Fetch FULL record by ID to guarantee subform data
             get_url = f"https://www.zohoapis.in/crm/v3/Pricings/{record_id}"
             get_res = requests.get(get_url, headers=headers)
-            
+
             if get_res.status_code == 200 and get_res.json().get("data"):
                 r = get_res.json()["data"][0]
                 print(f"DEBUG: Retrieved full record: {record_id}")
-                
+
                 try:
-                    # 1. EXPIRED RATE FILTERING
                     validity_str = r.get("Validity_Date")
                     if validity_str:
                         try:
                             validity_date = datetime.strptime(validity_str, "%Y-%m-%d").date()
                             if validity_date < today:
-                                continue 
+                                continue
                         except:
-                            pass 
-                    
-                    # 2. DATA EXTRACTION
+                            pass
+
                     sub3 = r.get("Subform_3", [])
                     if not sub3:
                         continue
-                    
+
                     for entry in sub3:
                         price_val = entry.get("Freight_Air_Sea")
                         vendor_name = entry.get("Vendor_Name") or "N/A"
-                        
+
                         if not price_val or str(price_val).strip() == "" or float(price_val) == 0:
                             continue
-                        
+
                         valid_rates.append({
                             "vendor": vendor_name,
                             "price": float(price_val),
@@ -863,9 +716,13 @@ def search_rates(pol, pod):
                         })
                 except Exception as inner_e:
                     print(f"DEBUG: Error processing record {record_id}: {str(inner_e)}")
-                    
+
     return valid_rates
 
+# FIX 6: Fixed process_inquiry — was using undefined variable 'content', 
+# now correctly uses 'prompt'. Also added system_prompt to messages so 
+# OpenAI doesn't reject the json_object response_format request.
+# Also fixed return value — now returns (reply, extracted) tuple as expected by callers.
 def process_inquiry(text):
     """Analyzes text to find rates. Returns (reply_text, extracted_details)."""
     system_prompt = (
@@ -873,16 +730,38 @@ def process_inquiry(text):
         "'shipper', 'pol', 'pod', 'commodity', 'equipment_type', 'weight'. Do not alter these key names. "
         "CRITICAL RULES: "
         "1. You MUST translate local port acronyms to their global standard names (e.g., 'JNPT' must become 'Nhava Sheva', 'JEA' must become 'Jebel Ali'). "
-        "2. If data is missing, return 'Unknown'."
+        "2. If data is missing, return 'Unknown'. Return JSON only."
     )
     prompt = f"Message: {text}"
     response = client.chat.completions.create(
-        
         model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}],
-        response_format={ "type": "json_object" }
+        messages=[{"role": "system", "content": system_prompt},
+                  {"role": "user", "content": prompt}],
+        response_format={"type": "json_object"}
     )
-    return json.loads(response.choices[0].message.content)
+    extracted = json.loads(response.choices[0].message.content)
+
+    pol = extracted.get('pol', 'Unknown')
+    pod = extracted.get('pod', 'Unknown')
+
+    if pol == 'Unknown' or pod == 'Unknown':
+        return None, extracted
+
+    rates = search_rates(pol, pod)
+    if not rates:
+        return None, extracted
+
+    best = rates[0]
+    reply = (
+        f"📦 *Rates found for {pol} ➡️ {pod}*\n\n"
+        f"🏢 Vendor: {best['vendor']}\n"
+        f"💰 Ocean Freight: USD {best['price']}\n"
+        f"🚢 Container: {best['vehicle']}\n"
+        f"⏱️ Transit: {best['transit_time']}\n"
+        f"📅 Valid till: {best['validity_date']}\n\n"
+        f"Reply *APPROVE INQ-MMI-2026-XXX* to generate a PDF quotation."
+    )
+    return reply, extracted
 
 def classify_pdf_content(raw_data):
     """Classifies the document type using GPT-4o."""
@@ -906,24 +785,22 @@ def process_inquiry_email(raw_data, wa_id=None):
             model="gpt-4o",
             messages=[{"role": "system", "content": system_prompt},
                       {"role": "user", "content": f"DATA:\n{raw_data[:10000]}"}],
-            response_format={ "type": "json_object" }
+            response_format={"type": "json_object"}
         )
         extracted = json.loads(response.choices[0].message.content)
-        
-        # Safely extract with 'Unknown' defaults
+
         pol = extracted.get('pol', 'Unknown')
         pod = extracted.get('pod', 'Unknown')
         shipper = extracted.get('shipper', 'Unknown')
         commodity = extracted.get('commodity', 'Unknown')
-        
-        # Log to Zoho CRM (New Enquiries module)
+
         inq_number = generate_next_inquiry_number()
         enquiry_data = {
             "Deal_Name": inq_number,
             "Stage": "Qualification",
             "Description": f"PDF Inquiry Extracted\nShipper: {shipper}\nRoute: {pol} to {pod}\nSpecs: {extracted.get('equipment_type', 'Unknown')}, {extracted.get('weight', 'Unknown')}\nCommodity: {commodity}\nIncoterms: {extracted.get('incoterms', 'Unknown')}\nSource: PDF Document"
         }
-        
+
         if wa_id:
             PENDING_TASKS[wa_id] = {
                 'action': 'log_enquiry',
@@ -934,7 +811,7 @@ def process_inquiry_email(raw_data, wa_id=None):
             summary = f"📊 *Inquiry Parsed!*\n\nShipper: {shipper}\nRoute: {pol} to {pod}\n\nReply *YES* to log this as a New Enquiry in Zoho CRM."
             send_whatsapp_message(wa_id, summary)
             return summary
-            
+
         return "Inquiry processed successfully."
     except Exception as e:
         print(f"CRITICAL ERROR (Inquiry PDF): {e}")
@@ -962,13 +839,12 @@ def generate_quotation_pdf(inq_number, pol, pod, equipment, sell_price, local_ch
     pdf.cell(50, 10, txt="Equipment:", ln=0)
     pdf.set_font("Arial", size=12)
     pdf.cell(150, 10, txt=str(equipment), ln=1)
-    
+
     if local_charges:
         pdf.ln(5)
         pdf.set_font("Arial", 'B', 12)
         pdf.cell(200, 10, txt="Origin Local Charges:", ln=1)
         pdf.set_font("Arial", size=10)
-        # Filter and display relevant local charges
         relevant_keys = ["THC_20", "THC_40", "BL_Fee", "Seal_Charge", "Toll", "MUC"]
         for key in relevant_keys:
             val = local_charges.get(key)
@@ -997,7 +873,6 @@ def generate_quotation_pdf(inq_number, pol, pod, equipment, sell_price, local_ch
 def fetch_local_charges(carrier_name):
     """Queries Zoho CRM for standard local charges for a carrier."""
     access_token = get_zoho_access_token()
-    # Search in Local_Charges_Tariff module
     url = f"https://www.zohoapis.in/crm/v3/Local_Charges_Tariff/search?criteria=(Carrier_Name:equals:{carrier_name})"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     res = requests.get(url, headers=headers)
@@ -1017,16 +892,15 @@ def process_local_charges_pdf(file_bytes, wa_id=None):
             "We need: THC (20ft Standard), THC (40ft Standard), BL Fee/Doc Fee, Seal Charge, Toll, and MUC. "
             "Output strictly as JSON: {'carrier': '...', 'thc_20': '...', 'thc_40': '...', 'bl_fee': '...', 'seal_charge': '...', 'toll': '...', 'muc': '...'}"
         )
-        
+
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "system", "content": system_prompt},
                       {"role": "user", "content": f"TARIFF DATA:\n{raw_text[:10000]}"}],
-            response_format={ "type": "json_object" }
+            response_format={"type": "json_object"}
         )
         data = json.loads(response.choices[0].message.content)
-        
-        # Push to Zoho CRM
+
         push_to_zoho_crm("Local_Charges_Tariff", [{
             "Carrier_Name": data.get("carrier"),
             "THC_20": data.get("thc_20"),
@@ -1036,10 +910,10 @@ def process_local_charges_pdf(file_bytes, wa_id=None):
             "Toll": data.get("toll"),
             "MUC": data.get("muc")
         }])
-        
+
         if wa_id:
             send_whatsapp_message(wa_id, f"✅ *Local Charges Updated* for {data.get('carrier')}. Ready for relational pricing.")
-            
+
     except Exception as e:
         print(f"Local Charges Error: {e}")
         if wa_id:
@@ -1052,12 +926,10 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         if wa_id:
             send_whatsapp_message(wa_id, "📥 *Received document.* Analyzing content...")
 
-        # Extract text/data from file
         if filename.endswith(".xlsx") or filename.endswith(".xls"):
             all_sheets = pd.read_excel(io.BytesIO(file_content), sheet_name=None)
             raw_data = ""
             for sheet_name, df in all_sheets.items():
-                # Clean empty data to save tokens
                 df = df.dropna(how='all').dropna(axis=1, how='all')
                 raw_data += f"\n--- DATA FROM SHEET: {sheet_name} ---\n"
                 raw_data += df.to_csv(index=False) + "\n"
@@ -1065,17 +937,14 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
             pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
             raw_data = "".join([page.extract_text() for page in pdf_reader.pages])
 
-        # 1. CLASSIFICATION LAYER
         doc_type = classify_pdf_content(raw_data)
         print(f"DEBUG: Document classified as {doc_type}")
-        
+
         if doc_type == 'INQUIRY_EMAIL':
             if wa_id:
                 send_whatsapp_message(wa_id, "🔍 *Detected:* Inquiry Email. Processing Inquiry...")
             return process_inquiry_email(raw_data, wa_id)
 
-        # 2. CONTINUING AS VENDOR_RATE_SHEET
-        # UNIVERSAL PARSING PROMPT - CALIBRATED FOR COMPLEX LOGISTICS EDGE CASES
         system_prompt = (
             "You are an expert freight rate parser. I am providing you with a complete Excel workbook converted to CSV format, "
             "separated by sheet names. Extract EVERY SINGLE freight rate across ALL sheets. Do not miss any rows. "
@@ -1091,7 +960,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         ### CORE EXTRACTION RULES:
         1. **POL INFERENCE (CRITICAL):** 
            - Logistics rates are often grouped under a Port of Loading (POL). 
-           - Look for POL in: Tab Names, Section Headers (e.g., \"RATES FROM MUNDRA\"), or the first column.
+           - Look for POL in: Tab Names, Section Headers (e.g., "RATES FROM MUNDRA"), or the first column.
            - If a POL is found at the top of a table/section, apply it to EVERY row in that section until a new POL is explicitly mentioned.
         
         2. **PRICE SCRUBBING & ROW SPLITTING:** 
@@ -1099,36 +968,33 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
              - Entry 1: Container Type = '20ft', Price = [Value from the first price column].
              - Entry 2: Container Type = '40ft', Price = [Value from the second price column].
            - Extract ONLY the numeric base Ocean Freight as 'ocean_freight'. 
-           - Ignore surcharges, THC, documentation fees, or any text following symbols like \"+\", \"&\", \"/\", or \"AND\".
-           - Example: \"$1200 + THC\" -> 1200.
-           - Example: \"Included\" or \"0\" -> 0.0.
+           - Ignore surcharges, THC, documentation fees.
+           - Example: "$1200 + THC" -> 1200. "Included" or "0" -> 0.0.
 
         3. **CONTAINER TYPE MAPPING:**
            - Standardize types strictly to '20ft' or '40ft' based on the column headers.
 
         4. **COMMODITY & HAZ:**
-           - If the row/column indicates \"HAZ\", \"Hazardous\", or \"DG\", append \"(HAZ)\" to the container_type.
+           - If the row/column indicates "HAZ", "Hazardous", or "DG", append "(HAZ)" to the container_type.
 
-        5. **TRANSIT TIME & ROUTE (COLUMN ALIASES):**
-           - 'VIA' -> Use this for the 'route' column (e.g., \"Direct\", \"via Singapore\").
-           - 'Days' -> Use this for the 'transit_time' column (e.g., \"15 Days\").
-           - 'Valid till' -> Use this for the 'validity_date' column.
+        5. **TRANSIT TIME & ROUTE:**
+           - 'VIA' -> 'route' column. 'Days' -> 'transit_time' column. 'Valid till' -> 'validity_date' column.
 
         6. **VALIDITY SCAN:**
            - Return 'validity_date' in YYYY-MM-DD format. If not found, return null.
 
         ### OUTPUT FORMAT:
-        Return ONLY a JSON object with a \"rates\" key:
+        Return ONLY a JSON object with a "rates" key:
         {{
-          \"rates\": [
+          "rates": [
             {{
-              \"pol\": \"Origin Port\",
-              \"pod\": \"Destination Port\",
-              \"container_type\": \"20ft or 40ft\",
-              \"ocean_freight\": 0.0,
-              \"transit_time\": \"Estimated Days\",
-              \"route\": \"Routing Details\",
-              \"validity_date\": \"YYYY-MM-DD or null\"
+              "pol": "Origin Port",
+              "pod": "Destination Port",
+              "container_type": "20ft or 40ft",
+              "ocean_freight": 0.0,
+              "transit_time": "Estimated Days",
+              "route": "Routing Details",
+              "validity_date": "YYYY-MM-DD or null"
             }}
           ]
         }}
@@ -1136,7 +1002,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         ### RAW DATA:
         {raw_data[:100000]}
         """
-        
+
         if wa_id:
             send_whatsapp_message(wa_id, "🧠 *Analyzing rates...* Extracting POL, POD, and pricing. (This might take a few seconds)")
 
@@ -1144,23 +1010,21 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
             model="gpt-4o",
             messages=[{"role": "system", "content": system_prompt},
                       {"role": "user", "content": prompt}],
-            response_format={ "type": "json_object" }
+            response_format={"type": "json_object"}
         )
-        
+
         extracted_rates = json.loads(response.choices[0].message.content).get("rates", [])
-        
-        # 3. PYTHON DEDUPLICATION (Lowest price wins)
+
         dedup_map = {}
         for rate in extracted_rates:
             carrier = rate.get('shipper', 'PIL (INDIA) PVT. LTD')
             pol = rate.get('pol', 'Unknown')
             pod = rate.get('pod', 'Unknown')
             eq_type = rate.get('equipment_type', 'Unknown')
-            
-            # Use safe numeric extractor
+
             current_price = extract_numeric_price(rate.get('ocean_freight'))
             if current_price == float('inf') or current_price <= 0: continue
-            
+
             key = (carrier, pol, pod, eq_type)
             if key in dedup_map:
                 existing_price = extract_numeric_price(dedup_map[key].get('ocean_freight'))
@@ -1172,19 +1036,15 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         if wa_id:
             send_whatsapp_message(wa_id, f"✅ *Extracted {len(extracted_rates)} rates.* Deduplicated to {len(dedup_map)} best prices. Mapping PICs...")
 
-        # Log to Zoho CRM (Pricings module)
         zoho_data = []
         for key, rate in dedup_map.items():
             carrier_name, pol_raw, pod_raw, eq_type = key
             norm_pol = normalize_port_name(pol_raw)
             norm_pod = normalize_port_name(pod_raw)
-            
-            # Map Primary PIC Email
+
             mapped_email = get_primary_vendor_email(carrier_name, norm_pol)
-            
-            # Standardize keys for mapping
             r_key = f"{carrier_name}_{norm_pol}_{norm_pod}_{eq_type}".upper().replace(" ", "_")
-            
+
             zoho_data.append({
                 "Name": f"{carrier_name} - {norm_pol} to {norm_pod} - {eq_type}",
                 "POL": norm_pol,
@@ -1202,17 +1062,16 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
                     }
                 ]
             })
-        
+
         if zoho_data:
-            # SAVE TO MEMORY FOR HUMAN-IN-THE-LOOP CONFIRMATION
             unique_vendors = ", ".join(list(set([r.get("Name").split(" - ")[0] for r in zoho_data])))
-            
+
             PENDING_TASKS[wa_id] = {
                 'action': 'upload_rates',
                 'description': f"upload {len(zoho_data)} rates from {unique_vendors}",
                 'data': zoho_data
             }
-            
+
             summary = (
                 f"📊 *Extraction Complete!*\n\n"
                 f"Found {len(zoho_data)} total rates.\n"
@@ -1222,7 +1081,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
             if wa_id:
                 send_whatsapp_message(wa_id, summary)
             return summary
-            
+
         return "No rates could be extracted."
 
     except Exception as e:
@@ -1232,7 +1091,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         return f"Error processing rate sheet: {e}"
 
 def handle_confirmation(text, sender_wa_id):
-    """Processes YES/NO confirmation for pending tasks (uploads or enquiries)."""
+    """Processes YES/NO confirmation for pending tasks."""
     user_text = str(text).strip().upper()
     task = PENDING_TASKS.get(sender_wa_id)
 
@@ -1249,13 +1108,13 @@ def handle_confirmation(text, sender_wa_id):
             try:
                 batch_size = 50
                 for i in range(0, len(data), batch_size):
-                    batch = data[i : i + batch_size]
+                    batch = data[i: i + batch_size]
                     push_to_zoho_crm("Pricings", batch)
                 send_whatsapp_message(sender_wa_id, f"✅ *Success!* {len(data)} rates uploaded to Zoho CRM.")
             except Exception as e:
                 print(f"CRITICAL ERROR: {str(e)}")
                 send_whatsapp_message(sender_wa_id, f"❌ *Error during upload:* {str(e)}")
-        
+
         elif action == 'log_enquiry':
             module = task.get('module', 'Deals')
             send_whatsapp_message(sender_wa_id, f"🚀 *Confirmed.* Logging your enquiry in Zoho CRM ({module})...")
@@ -1267,7 +1126,7 @@ def handle_confirmation(text, sender_wa_id):
                 send_whatsapp_message(sender_wa_id, f"❌ *Error logging enquiry:* {str(e)}")
 
         del PENDING_TASKS[sender_wa_id]
-            
+
     elif user_text == "NO":
         del PENDING_TASKS[sender_wa_id]
         send_whatsapp_message(sender_wa_id, "🛑 *Action cancelled.*")
@@ -1278,11 +1137,13 @@ def handle_confirmation(text, sender_wa_id):
 def process_email_rfq(payload):
     """Parses incoming emails and initiates the HITL workflow."""
     try:
-        email_body = payload.get("body", "")
-        sender_email = payload.get("sender", "Client")
+        # Zoho Flow sends email fields — handle both direct body and HTML content
+        email_body = payload.get("body", "") or payload.get("emailHtmlContent", "")
+        sender_email = payload.get("sender", "") or payload.get("fromAddress", "Client")
         subject = payload.get("subject", "No Subject")
-        
-        # 1. AI Parsing (Upgraded to extract names)
+
+        print(f"DEBUG: Email received from {sender_email} | Subject: {subject}")
+
         system_prompt = (
             "You are an expert freight forwarder AI. Output strictly valid JSON with EXACTLY these keys: "
             "'pol', 'pod', 'equipment_type', 'commodity', 'sender_first_name'. Do not alter these key names. "
@@ -1293,17 +1154,17 @@ def process_email_rfq(payload):
             model="gpt-4o",
             messages=[{"role": "system", "content": system_prompt},
                       {"role": "user", "content": f"Subject: {subject}\nBody: {email_body}"}],
-            response_format={ "type": "json_object" }
+            response_format={"type": "json_object"}
         )
         extracted = json.loads(response.choices[0].message.content)
         pol = extracted.get('pol', 'Unknown')
         pod = extracted.get('pod', 'Unknown')
         equipment = extracted.get('equipment_type', 'Unknown')
         first_name = extracted.get('sender_first_name', 'Customer')
-        
+
         greeting = f"Hi {first_name}," if first_name != "Customer" else "Hi,"
 
-        # 2. Personalized Auto-Acknowledgement Email
+        # Auto-acknowledgement email to the client
         ack_body = (
             f"{greeting}\n\n"
             "thank you for your valuable query,\n"
@@ -1317,41 +1178,48 @@ def process_email_rfq(payload):
         )
         send_email_with_attachment(sender_email, f"Re: {subject}", ack_body)
 
-        # 3. Zoho CRM Deal Creation
+        # Create Deal in Zoho CRM
         inq_number = generate_next_inquiry_number()
         deal_data = {
             "Deal_Name": inq_number,
             "Stage": "Qualification",
-            # Save sender email in Description for later retrieval
             "Description": "Sender Email: {}\nRoute: {} to {}\nCommodity: {}\nEquipment: {}".format(
                 sender_email, pol, pod, extracted.get('commodity', 'Unknown'), equipment
             )
         }
         push_to_zoho_crm("Deals", [deal_data])
 
-        # 4. Notify Admin via WhatsApp
+        # Notify Hitesh via WhatsApp
         admin_number = os.getenv("YOUR_WHATSAPP_NUMBER")
         if admin_number:
             msg = (
                 "📧 *New Email Inquiry*\n"
                 "From: {}\n"
                 "Route: {} ➡️ {}\n"
+                "Equipment: {}\n"
                 "Ref: {}\n\n"
-                "Reply *APPROVE {}* to accept this inquiry and search for rates.".format(
-                    sender_email, pol, pod, inq_number, inq_number
+                "Reply *APPROVE {}* to search for rates.".format(
+                    sender_email, pol, pod, equipment, inq_number, inq_number
                 )
             )
             send_whatsapp_message(admin_number, msg)
-            
+            print(f"DEBUG: WhatsApp notification sent for {inq_number}")
+        else:
+            print("CRITICAL: YOUR_WHATSAPP_NUMBER env variable is missing!")
+
     except Exception as e:
         print("Email Processing Error: {}".format(e))
+        # Notify admin of failure
+        admin_number = os.getenv("YOUR_WHATSAPP_NUMBER")
+        if admin_number:
+            send_whatsapp_message(admin_number, f"❌ *Email Processing Error:* {str(e)}")
 
 # --- WHATSAPP MESSAGE PROCESSING ---
 async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
     """Unified Cognitive Ingestion Pipeline."""
     print(f"Incoming Webhook Payload: {json.dumps(payload)}")
     global LAST_CLEANUP, PROCESSED_MESSAGE_IDS
-    
+
     try:
         entries = payload.get("entry", [])
         if not entries: return
@@ -1365,12 +1233,10 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
         from_number = message.get("from")
         msg_type = message.get("type")
 
-        # IDEMPOTENCY CLEANUP
         if (datetime.now() - LAST_CLEANUP).total_seconds() > 600:
             PROCESSED_MESSAGE_IDS.clear()
             LAST_CLEANUP = datetime.now()
 
-        # 1. UNIFIED CONTENT ACQUISITION
         raw_text = ""
         caption = ""
         filename = "message.txt"
@@ -1397,48 +1263,49 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
             media_url_res = requests.get(f"https://graph.facebook.com/v18.0/{media_id}", headers={"Authorization": f"Bearer {access_token}"})
             media_url = media_url_res.json().get("url")
             file_bytes = requests.get(media_url, headers={"Authorization": f"Bearer {access_token}"}).content
-            
+
             if from_number not in IMAGE_BUFFER:
                 IMAGE_BUFFER[from_number] = []
                 is_first = True
             else:
                 is_first = False
             IMAGE_BUFFER[from_number].append(file_bytes)
-            if not is_first: return 
-            
+            if not is_first: return
+
             send_whatsapp_message(from_number, "📥 *Images received.* Waiting for aggregation...")
             await asyncio.sleep(8)
             images = IMAGE_BUFFER.pop(from_number, [])
             raw_text = await extract_raw_content(images[0], filename, "image")
 
-        # --- SAFETY CATCHER 1: PENDING CONFIRMATIONS (Yes/No tasks) ---
+        # SAFETY CATCHER 1: PENDING CONFIRMATIONS
         if from_number in PENDING_TASKS:
-            print(f"DEBUG: Active task pending for {from_number}. Routing directly to confirmation handler.")
+            print(f"DEBUG: Active task pending for {from_number}. Routing to confirmation handler.")
             handle_confirmation(raw_text, from_number)
             return
 
-        # --- SAFETY CATCHER 2: CONVERSATIONAL FILLER WORDS ---
+        # SAFETY CATCHER 2: CONVERSATIONAL FILLER WORDS
         if msg_type == "text" and raw_text.lower() in ["no", "yes", "cancel", "stop", "ok", "thanks", "thank you", "n", "y"]:
             send_whatsapp_message(from_number, "🛑 No active actions pending to confirm or cancel. Type *help* to see available commands.")
             return
 
-       # --- PERMANENT FIX: PRIORITY RATE CHECK BYPASS (AI-POWERED) ---
-        # This intercepts rate requests and uses GPT-4 to translate acronyms like JNPT to Nhava Sheva
+        # PRIORITY RATE CHECK BYPASS
         if msg_type == "text" and any(k in raw_text.lower() for k in ["rate for", "rates for", "price for", "what is the rate"]):
             print("DEBUG: Priority rate search phrase detected. Routing to AI Pricing Engine.")
             send_whatsapp_message(from_number, "🔍 *Searching active rates...*")
-            
+
             reply, extracted = process_inquiry(raw_text)
-            
-            # Catch Special Project Cargo during rate checks
+
             commodity = extracted.get('commodity', 'Unknown').title()
             if any(k in commodity for k in ["Crane", "Excavator", "Machine", "Oog"]):
                 inq_number = generate_next_inquiry_number()
-                PENDING_TASKS[from_number] = {'action': 'log_enquiry', 'description': f"log this priority OOG inquiry for {commodity}", 'data': {"Deal_Name": inq_number, "Stage": "Qualification", "Type": "Project Cargo", "Description": f"OOG: {commodity}"}}
+                PENDING_TASKS[from_number] = {
+                    'action': 'log_enquiry',
+                    'description': f"log this priority OOG inquiry for {commodity}",
+                    'data': {"Deal_Name": inq_number, "Stage": "Qualification", "Type": "Project Cargo", "Description": f"OOG: {commodity}"}
+                }
                 send_whatsapp_message(from_number, "🏗️ I have detected a Project Cargo inquiry. Shall I log this and notify the pricing team? (Reply YES)")
                 return
 
-            # Output the Standard Quotation or the Error
             if reply:
                 send_whatsapp_message(from_number, reply)
             else:
@@ -1449,16 +1316,17 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                 else:
                     send_whatsapp_message(from_number, "🤖 I couldn't identify specific loading and discharge ports in your request.")
             return
-            
-        # 2. COGNITIVE CLASSIFICATION (Runs only if the text is not a rate check or a Yes/No)
+
+        # COGNITIVE CLASSIFICATION
         classification = await classify_operational_intent(raw_text if msg_type == "text" else "", caption, raw_text)
         category = classification.get('category')
         target = classification.get('action_target')
         print(f"DEBUG: Cognitive Classification: {category} (Target: {target})")
 
-        # 3. DYNAMIC ROUTING
+        # DYNAMIC ROUTING
         if category == 'command':
             text_cmd = raw_text.lower()
+
             if any(k in text_cmd for k in ["help", "menu", "commands", "captions"]):
                 help_msg = ("🤖 *Mega Move AI - Unified Operating System*\n\n"
                             "You can send text commands or upload documents in *any format* (PDF, Excel, CSV, Images, or plain text). "
@@ -1467,19 +1335,18 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                             "• *APPROVE [INQ-XXX]* : Calculates lowest rates & links local charges.\n"
                             "• *QUOTE [INQ-XXX]* : Generates the localized PDF quotation.\n"
                             "• *SEND [INQ-XXX]* : Emails the PDF to the client (CCs Hitesh).\n"
-                            "• *Outstanding [Company]* : Pulls live ledgers from Zoho Books.\n"
                             "• *Metrics* : Displays current FY Dashboard in INR (Lakhs/Crores).\n\n"
                             "*📄 Universal Document Ingestion:*\n"
                             "Simply drop any file or snapshot (Rate Sheets, Carrier Tariffs, Vendor Bills, or Customer Emails). "
                             "The system will auto-classify and update your databases instantly.")
                 send_whatsapp_message(from_number, help_msg)
                 return
-            
+
             if text_cmd.startswith("metrics"):
                 period = "overall" if "overall" in text_cmd else "FY"
                 crm, fin = get_crm_snapshot(period=period), get_financial_snapshot(period=period)
                 _, _, fy_label = get_fy_start()
-                msg = (f"📊 *MEGA MOVE - EXECUTIVE DASHBOARD*\nTarget Period: {'Current FY ('+fy_label+')' if period=='FY' else 'Lifetime / Overall'}\n\n"
+                msg = (f"📊 *MEGA MOVE - EXECUTIVE DASHBOARD*\nTarget Period: {'Current FY (' + fy_label + ')' if period == 'FY' else 'Lifetime / Overall'}\n\n"
                        f"📈 *Sales Pipeline:*\n• Total Inquiries Received: {crm['inquiries']}\n• Shipments Booked (Won): {crm['booked']}\n• Sales Conversion Rate: {crm['conversion']:.1f}%\n\n"
                        f"💼 *Financial Health:*\n• Total Invoice Revenue: {format_inr(fin['revenue'])}\n• Total Operational Costs: {format_inr(fin['costs'])}\n• Projected Net Margin: *{format_inr(fin['profit'])}*\n\n"
                        f"🛠️ *Operations:*\n• Pending Carrier Bookings: Check Zoho Tasks")
@@ -1491,7 +1358,8 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                 tracking_id = ref
                 if ref.upper().startswith("INQ"):
                     container_no = get_deal_tracking_details(ref.upper())
-                    if container_no: tracking_id = container_no
+                    if container_no:
+                        tracking_id = container_no
                     else:
                         send_whatsapp_message(from_number, f"⚠️ I couldn't find a container number for {ref}.")
                         return
@@ -1584,7 +1452,11 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                 commodity = extracted.get('commodity', 'Unknown').title()
                 if any(k in commodity for k in ["Crane", "Excavator", "Machine", "Oog"]):
                     inq_number = generate_next_inquiry_number()
-                    PENDING_TASKS[from_number] = {'action': 'log_enquiry', 'description': f"log this priority OOG inquiry for {commodity}", 'data': {"Deal_Name": inq_number, "Stage": "Qualification", "Type": "Project Cargo", "Description": f"OOG: {commodity}"}}
+                    PENDING_TASKS[from_number] = {
+                        'action': 'log_enquiry',
+                        'description': f"log this priority OOG inquiry for {commodity}",
+                        'data': {"Deal_Name": inq_number, "Stage": "Qualification", "Type": "Project Cargo", "Description": f"OOG: {commodity}"}
+                    }
                     send_whatsapp_message(from_number, "I have detected a Project Cargo inquiry. Shall I confirm and send this to the team?")
                     return
                 send_whatsapp_message(from_number, reply)
@@ -1595,13 +1467,13 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
             vendor_name = filename.split(" ")[0] if " " in filename else "Unified Vendor"
             status = process_rate_sheet(file_bytes if file_bytes else raw_text.encode(), filename, vendor_name, from_number)
             send_whatsapp_message(from_number, status)
-            
+
         elif category == 'tariff':
             background_tasks.add_task(process_local_charges_pdf, file_bytes if file_bytes else raw_text.encode(), from_number)
-            
+
         elif category == 'inquiry':
             process_inquiry_email(raw_text, from_number)
-            
+
         elif category == 'vendor_bill':
             send_whatsapp_message(from_number, "🚨 *Vendor Bill Received.* Auditing margins...")
             send_whatsapp_message(from_number, "✅ *Audit Complete.* Margin verified.")

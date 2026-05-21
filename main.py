@@ -224,29 +224,30 @@ def search_lowest_rate(pol, pod):
                         if validity_date < today:
                             continue # Skip expired rates
                     except:
-                        pass # If date format is weird, we keep it but log it or ignore
+                        pass 
                 
-                # 2. PRICE EXTRACTION (Navigating Subform_3 for Freight_Air_Sea)
+                # 2. DATA EXTRACTION (Bulletproof with N/A fallbacks)
                 sub3 = r.get("Subform_3", [])
                 
                 price_val = None
+                vendor_name = "N/A"
                 if sub3:
                     price_val = sub3[0].get("Freight_Air_Sea")
+                    vendor_name = sub3[0].get("Vendor_Name") or "N/A"
                 
-                # Skip if price is missing, empty, or zero (prevents 0.00 false positives)
+                # Skip if price is missing or zero
                 if not price_val or str(price_val).strip() == "" or float(price_val) == 0:
                     continue
                 
-                price = float(price_val)
-                
-                # 3. CONTAINER TYPE EXTRACTION
-                vehicle = r.get("Container_Type", "Standard")
-
                 valid_rates.append({
-                    "vendor": sub3[0].get("Vendor_Name", "Unknown") if sub3 else "Unknown",
-                    "price": price,
-                    "vehicle": vehicle,
-                    "validity_date": validity_str or "Unknown"
+                    "vendor": vendor_name,
+                    "price": float(price_val),
+                    "vehicle": r.get("Container_Type") or "N/A",
+                    "transit_time": r.get("Transit_Time") or "N/A",
+                    "route": r.get("Route") or "N/A",
+                    "validity_date": validity_str or "N/A",
+                    "pol": r.get("POL") or normalized_pol,
+                    "pod": r.get("POD") or normalized_pod
                 })
             except Exception as inner_e:
                 print(f"DEBUG: Error processing individual rate: {str(inner_e)}")
@@ -273,10 +274,22 @@ def process_inquiry(text):
         if best_rate:
             margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
             sell_price = best_rate['price'] * (1 + (margin_pct / 100))
-            validity_info = f"⏳ Valid until: {best_rate.get('validity_date', 'Unknown')}"
             inq_number = generate_next_inquiry_number()
-            reply = f"✅ Rate Found for {pol} ➡️ {pod}\n\nPrice: USD {sell_price:.2f}\nEquipment: {best_rate['vehicle']}\nInquiry: {inq_number}\n{validity_info}"
+            
+            # Professional Structured Quotation
+            reply = (
+                f"🚢 *Quotation: {best_rate['pol']} ➡️ {best_rate['pod']}*\n\n"
+                f"📦 *Equipment:* {best_rate['vehicle']}\n"
+                f"🏢 *Vendor:* {best_rate['vendor']}\n"
+                f"💰 *Ocean Freight:* USD {sell_price:.2f}\n"
+                f"⏱️ *Transit Time:* {best_rate['transit_time']}\n"
+                f"🗺️ *Routing:* {best_rate['route']}\n"
+                f"⏳ *Valid until:* {best_rate['validity_date']}\n\n"
+                f"Ref: {inq_number}"
+            )
             return reply, extracted
+            
+    return None, extracted
             
     return None, extracted
 

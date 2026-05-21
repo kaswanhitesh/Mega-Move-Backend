@@ -1426,6 +1426,49 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
 
         # 3. DYNAMIC ROUTING
         if category == 'command':
+            # --- QUICK RATE LOOKUP BYPASS ---
+            rate_match = re.search(r"rate[s]? for (.+) to (.+)", raw_text, re.IGNORECASE)
+            if rate_match:
+                pol_raw = rate_match.group(1).strip().strip("?")
+                pod_raw = rate_match.group(2).strip().strip("?")
+                
+                std_pol = standardize_port_name(pol_raw)
+                std_pod = standardize_port_name(pod_raw)
+                
+                send_whatsapp_message(from_number, f"🔍 *Searching active rates for {std_pol} to {std_pod}...*")
+                
+                rates = search_rates(std_pol, std_pod)
+                if rates:
+                    # Group by vehicle type and pick best price
+                    best_rates_by_type = {}
+                    for r in rates:
+                        v_type = r['vehicle']
+                        if v_type not in best_rates_by_type or r['price'] < best_rates_by_type[v_type]['price']:
+                            best_rates_by_type[v_type] = r
+                    
+                    rates_text = ""
+                    margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
+                    for v_type, rate in best_rates_by_type.items():
+                        sell_price = rate['price'] * (1 + (margin_pct / 100))
+                        rates_text += (
+                            f"📦 *Equipment:* {v_type}\n"
+                            f"💰 *Ocean Freight:* USD {sell_price:.2f}\n"
+                            f"⏱️ *Transit Time:* {rate['transit_time']}\n"
+                            f"🗺️ *Routing:* {rate['route']}\n"
+                            f"⏳ *Valid until:* {rate['validity_date']}\n\n"
+                        )
+                    
+                    msg = (
+                        f"📊 *Quick Rate Check*\n"
+                        f"Route: {std_pol} ➡️ {std_pod}\n\n"
+                        f"{rates_text}"
+                        f"🏢 *Vendor:* {rates[0]['vendor']}"
+                    )
+                    send_whatsapp_message(from_number, msg)
+                else:
+                    send_whatsapp_message(from_number, f"⚠️ No active rates found for {std_pol} to {std_pod} in Zoho CRM.")
+                return
+
             text_cmd = raw_text.lower()
             if any(k in text_cmd for k in ["help", "menu", "commands", "captions"]):
                 help_msg = ("🤖 *Mega Move AI - Unified Operating System*\\n\\n"

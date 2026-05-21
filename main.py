@@ -210,6 +210,7 @@ def search_lowest_rate(pol, pod):
         today = datetime.now().date()
         
         for r in rates:
+            print(f"DEBUG: Retrieved record: {r}")
             try:
                 # 1. EXPIRED RATE FILTERING
                 validity_str = r.get("Validity_Date")
@@ -221,18 +222,21 @@ def search_lowest_rate(pol, pod):
                     except:
                         pass # If date format is weird, we keep it but log it or ignore
                 
-                # We need to extract the price from Subform_3 and vehicle from Subform_2
-                # Since search results for Pricings module will contain these subforms
+                # 2. PRICE EXTRACTION (Navigating Subform_3 for Freight_Air_Sea)
                 sub3 = r.get("Subform_3", [])
-                sub2 = r.get("Subform_2", [])
                 
-                price = 0.0
+                price_val = None
                 if sub3:
-                    price = float(sub3[0].get("Ex_Work_Charges", 0))
+                    price_val = sub3[0].get("Freight_Air_Sea")
                 
-                vehicle = "Standard"
-                if sub2:
-                    vehicle = sub2[0].get("Vehicle_Types", "Standard")
+                # Skip if price is missing, empty, or zero (prevents 0.00 false positives)
+                if not price_val or str(price_val).strip() == "" or float(price_val) == 0:
+                    continue
+                
+                price = float(price_val)
+                
+                # 3. CONTAINER TYPE EXTRACTION
+                vehicle = r.get("Container_Type", "Standard")
 
                 valid_rates.append({
                     "vendor": sub3[0].get("Vendor_Name", "Unknown") if sub3 else "Unknown",
@@ -240,8 +244,10 @@ def search_lowest_rate(pol, pod):
                     "vehicle": vehicle,
                     "validity_date": validity_str or "Unknown"
                 })
-            except:
+            except Exception as inner_e:
+                print(f"DEBUG: Error processing individual rate: {str(inner_e)}")
                 pass
+                
         if valid_rates:
             return min(valid_rates, key=lambda x: x['price'])
     return None

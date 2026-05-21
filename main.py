@@ -215,6 +215,9 @@ def search_lowest_rate(pol, pod):
         
         for r in rates:
             print(f"DEBUG: Retrieved record: {r}")
+            sub3 = r.get("Subform_3", [])
+            print(f"DEBUG: Subform_3 contents: {sub3}")
+            
             try:
                 # 1. EXPIRED RATE FILTERING
                 validity_str = r.get("Validity_Date")
@@ -226,31 +229,32 @@ def search_lowest_rate(pol, pod):
                     except:
                         pass 
                 
-                # 2. DATA EXTRACTION (Bulletproof with N/A fallbacks)
-                sub3 = r.get("Subform_3", [])
-                
-                price_val = None
-                vendor_name = "N/A"
-                if sub3:
-                    price_val = sub3[0].get("Freight_Air_Sea")
-                    vendor_name = sub3[0].get("Vendor_Name") or "N/A"
-                
-                # Skip if price is missing or zero
-                if not price_val or str(price_val).strip() == "" or float(price_val) == 0:
+                # 2. DATA EXTRACTION (Iterating Subform_3 for Freight_Air_Sea)
+                if not sub3:
+                    print("DEBUG: Subform_3 is empty, skipping record.")
                     continue
                 
-                valid_rates.append({
-                    "vendor": vendor_name,
-                    "price": float(price_val),
-                    "vehicle": r.get("Container_Type") or "N/A",
-                    "transit_time": r.get("Transit_Time") or "N/A",
-                    "route": r.get("Route") or "N/A",
-                    "validity_date": validity_str or "N/A",
-                    "pol": r.get("POL") or normalized_pol,
-                    "pod": r.get("POD") or normalized_pod
-                })
+                for entry in sub3:
+                    price_val = entry.get("Freight_Air_Sea")
+                    vendor_name = entry.get("Vendor_Name") or "N/A"
+                    
+                    # Skip if price is missing or zero
+                    if not price_val or str(price_val).strip() == "" or float(price_val) == 0:
+                        print(f"DEBUG: Skipping subform entry due to invalid price: {price_val}")
+                        continue
+                    
+                    valid_rates.append({
+                        "vendor": vendor_name,
+                        "price": float(price_val),
+                        "vehicle": r.get("Container_Type") or "N/A",
+                        "transit_time": r.get("Transit_Time") or "N/A",
+                        "route": r.get("Route") or "N/A",
+                        "validity_date": validity_str or "N/A",
+                        "pol": r.get("POL") or normalized_pol,
+                        "pod": r.get("POD") or normalized_pod
+                    })
             except Exception as inner_e:
-                print(f"DEBUG: Error processing individual rate: {str(inner_e)}")
+                print(f"DEBUG: Error processing individual record: {str(inner_e)}")
                 pass
                 
         if valid_rates:

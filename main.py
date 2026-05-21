@@ -12,6 +12,7 @@ import re
 from datetime import datetime
 from rapidfuzz import process, fuzz
 import base64
+import asyncio
 
 app = FastAPI(title="Mega Move AI Backend")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -20,6 +21,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 PENDING_TASKS = {}
 PROCESSED_MESSAGE_IDS = set()
 LAST_CLEANUP = datetime.now()
+IMAGE_BUFFER = {}
 
 # --- MASTER CONFIGURATION ---
 PORT_ALIASES = {
@@ -308,28 +310,22 @@ def process_inquiry(text):
             
     return None, extracted
 
-def process_image_inquiry(image_bytes):
-    """Analyzes an image using GPT-4o-vision. Returns extracted JSON."""
-    base64_image = base64.b64encode(image_bytes).decode('utf-8')
+def process_image_inquiry(image_bytes_list):
+    """Analyzes multiple images using GPT-4o-vision. Returns extracted JSON."""
+    content = [{"type": "text", "text": "Analyze these screenshots. Extract the Shipper Name, POL, POD, Cargo Details (specifically model, qty, and dimensions), and Readiness date. Return the output as a JSON object."}]
     
-    prompt = "Analyze these screenshots. Extract the Shipper Name, POL, POD, Cargo Details (specifically model, qty, and dimensions), and Readiness date. Return the output as a JSON object."
+    for img_bytes in image_bytes_list:
+        base64_image = base64.b64encode(img_bytes).decode('utf-8')
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{base64_image}"
+            }
+        })
     
     response = client.chat.completions.create(
         model="gpt-4o",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}"
-                        }
-                    }
-                ]
-            }
-        ],
+        messages=[{"role": "user", "content": content}],
         response_format={ "type": "json_object" }
     )
     return json.loads(response.choices[0].message.content)
@@ -681,12 +677,10 @@ def process_whatsapp_message(payload):
             status = process_rate_sheet(file_bytes, filename, vendor_name, from_number)
             send_whatsapp_message(from_number, status)
 
-        # 1.1 HANDLE IMAGES (Project Cargo/OOG Enquiries)
+        # 1.1 HANDLE IMAGES (Project Cargo/OOG Enquiries with Aggregation Buffer)
         elif message.get("type") == "image":
             img = message.get("image")
             media_id = img.get("id")
-            
-            send_whatsapp_message(from_number, "👁️ *Vision AI:* Analyzing your image for shipment details...")
             
             access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
             media_url_res = requests.get(f"https://graph.facebook.com/v18.0/{media_id}", 
@@ -694,25 +688,54 @@ def process_whatsapp_message(payload):
             media_url = media_url_res.json().get("url")
             image_bytes = requests.get(media_url, headers={"Authorization": f"Bearer {access_token}"}).content
             
-            extracted = process_image_inquiry(image_bytes)
+            # Buffer management
+            if from_number not in IMAGE_BUFFER:
+                IMAGE_BUFFER[from_number] = []
+                # First image in batch starts the timer
+                is_first = True
+            else:
+                is_first = False
+                
+            IMAGE_BUFFER[from_number].append(image_bytes)
             
-            commodity = extracted.get("commodity") or extracted.get("Cargo Details", "General Cargo")
-            inq_number = generate_next_inquiry_number()
-            
-            enquiry_data = {
-                "Deal_Name": inq_number,
-                "Stage": "Qualification",
-                "Type": "Project Cargo",
-                "Description": f"Vision AI Extracted Inquiry\nShipper: {extracted.get('Shipper Name')}\nRoute: {extracted.get('POL')} to {extracted.get('POD')}\nCargo: {commodity}\nReadiness: {extracted.get('Readiness date')}\nSource: WhatsApp Image"
-            }
-            
-            PENDING_TASKS[from_number] = {
-                'action': 'log_enquiry',
-                'description': f"log this inquiry for {commodity}",
-                'data': enquiry_data
-            }
-            
-            send_whatsapp_message(from_number, f"📊 *Extraction Complete!*\n\nI have parsed the inquiry for {commodity}. It appears to be a Project Cargo lead.\n\nReply *YES* to log this into Zoho CRM.")
+            if is_first:
+                send_whatsapp_message(from_number, "📥 *Images received.* Waiting 10s for additional screenshots before analysis...")
+                await asyncio.sleep(10)
+                
+                # BATCH PROCESSING
+                send_whatsapp_message(from_number, "👁️ *Vision AI:* Analyzing all buffered images for shipment details...")
+                
+                try:
+                    images_to_process = IMAGE_BUFFER[from_number]
+                    extracted = process_image_inquiry(images_to_process)
+                    
+                    # Clear buffer early to prevent race conditions on subsequent messages
+                    IMAGE_BUFFER.pop(from_number, None)
+                    
+                    commodity = extracted.get("commodity") or extracted.get("Cargo Details", "General Cargo")
+                    inq_number = generate_next_inquiry_number()
+                    
+                    enquiry_data = {
+                        "Deal_Name": inq_number,
+                        "Stage": "Qualification",
+                        "Type": "Project Cargo",
+                        "Description": f"Vision AI Multi-Image Inquiry\nShipper: {extracted.get('Shipper Name')}\nRoute: {extracted.get('POL')} to {extracted.get('POD')}\nCargo: {commodity}\nReadiness: {extracted.get('Readiness date')}\nSource: WhatsApp Images ({len(images_to_process)} files)"
+                    }
+                    
+                    PENDING_TASKS[from_number] = {
+                        'action': 'log_enquiry',
+                        'description': f"log this inquiry for {commodity}",
+                        'data': enquiry_data
+                    }
+                    
+                    send_whatsapp_message(from_number, f"📊 *Extraction Complete!*\n\nI have analyzed {len(images_to_process)} images and parsed the inquiry for {commodity}.\n\nReply *YES* to log this into Zoho CRM.")
+                except Exception as e:
+                    print(f"Vision Processing Error: {e}")
+                    IMAGE_BUFFER.pop(from_number, None)
+                    send_whatsapp_message(from_number, f"❌ *Error during image analysis:* {str(e)}")
+            else:
+                # Subsequent images just get a small notification or silent append
+                print(f"Added additional image to buffer for {from_number}")
 
         # 2. HANDLE TEXT (Greetings or Inquiries)
         elif message.get("type") == "text":

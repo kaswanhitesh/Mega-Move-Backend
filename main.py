@@ -273,7 +273,7 @@ def process_rate_sheet(file_content, filename, vendor_name):
                 batch_size = 50
                 for i in range(0, len(zoho_data), batch_size):
                     batch = zoho_data[i : i + batch_size]
-                    push_to_zoho_crm("CustomModule1", batch)
+                    push_to_zoho_crm("Pricings", batch)
                 
                 return f"Successfully processed {len(zoho_data)} rates for {vendor_name}."
             except Exception as zoho_err:

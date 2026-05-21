@@ -10,7 +10,7 @@ import PyPDF2
 from fpdf import FPDF
 import re
 from datetime import datetime
-import difflib
+from rapidfuzz import process, fuzz
 
 app = FastAPI(title="Mega Move AI Backend")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -35,19 +35,44 @@ def normalize_port_name(raw_name):
     if not raw_name:
         return raw_name
     
-    clean_name = str(raw_name).strip().upper()
+    # STEP 1: NORMALIZATION PIPELINE
+    # 1.1 Convert to uppercase
+    name = str(raw_name).upper()
     
-    # 1. Direct Alias Match
-    if clean_name in PORT_ALIASES:
-        return PORT_ALIASES[clean_name]
+    # 1.2 Replace punctuation (commas, slashes) with spaces
+    name = re.sub(r'[,/]', ' ', name)
     
-    # 2. Fuzzy Match against Values
+    # 1.3 Strip noise words
+    noise_words = ["PORT", "TERMINAL", "WHARF", "CHINA", "INDIA", "UAE"]
+    for word in noise_words:
+        # Use regex to replace only full words to avoid partial matches (e.g., "PORT SAID")
+        name = re.sub(rf'\b{word}\b', '', name)
+    
+    # 1.4 Clean extra whitespace
+    name = re.sub(r'\s+', ' ', name).strip()
+
+    if not name:
+        return raw_name
+
+    # STEP 2: ALIAS CHECK
+    if name in PORT_ALIASES:
+        return PORT_ALIASES[name]
+
+    # STEP 3: RAPIDFUZZ MATCHING
     standard_names = list(set(PORT_ALIASES.values()))
-    matches = difflib.get_close_matches(clean_name, standard_names, n=1, cutoff=0.8)
-    if matches:
-        return matches[0]
+    result = process.extractOne(name, standard_names, scorer=fuzz.token_sort_ratio)
+    
+    if result:
+        matched_name, score, _ = result
         
-    return clean_name.title()
+        # STEP 4: THRESHOLD LOGIC
+        if score > 90:
+            return matched_name
+        elif score >= 70:
+            print(f"REVIEW_REQUIRED: '{raw_name}' matched with '{matched_name}' at {score:.1f}%")
+            return matched_name
+            
+    return name.title()
 
 @app.get("/")
 def read_root():

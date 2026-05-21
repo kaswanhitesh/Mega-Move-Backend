@@ -195,6 +195,22 @@ def standardize_port_name(raw_port):
     if not name:
         return raw_port.title().strip()
 
+    # --- PERMANENT FIX: HARDCODED ACRONYM SAFETY NET ---
+    common_aliases = {
+        "JNPT": "Nhava Sheva",
+        "JNP": "Nhava Sheva",
+        "NSICT": "Nhava Sheva",
+        "NSIGT": "Nhava Sheva",
+        "GTI": "Nhava Sheva",
+        "BMCT": "Nhava Sheva"
+        "JEA": "Jebel Ali",
+        "JED": "Jebel Ali",
+        "SIN": "Singapore",
+        "PKG": "Port Klang"
+    }
+    if name in common_aliases:
+        return common_aliases[name]
+
     # STEP 2: RAPIDFUZZ MATCHING AGAINST GLOBAL DATABASE
     if GLOBAL_PORT_ALIASES:
         # Match against values (port names)
@@ -207,7 +223,6 @@ def standardize_port_name(raw_port):
                 return matched_name.title()
 
     return name.title()
-
 def normalize_port_name(raw_name):
     # Wrapper for backward compatibility
     return standardize_port_name(raw_name)
@@ -815,76 +830,13 @@ def process_inquiry(text):
     system_prompt = (
         "You are an expert freight forwarder AI. Output strictly valid JSON with EXACTLY these keys: "
         "'shipper', 'pol', 'pod', 'commodity', 'equipment_type', 'weight'. Do not alter these key names. "
-        "If data is missing, return 'Unknown'."
+        "CRITICAL RULES: "
+        "1. You MUST translate local port acronyms to their global standard names (e.g., 'JNPT' must become 'Nhava Sheva', 'JEA' must become 'Jebel Ali'). "
+        "2. If data is missing, return 'Unknown'."
     )
     prompt = f"Message: {text}"
     response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "system", "content": system_prompt},
-                  {"role": "user", "content": prompt}],
-        response_format={ "type": "json_object" }
-    )
-    extracted = json.loads(response.choices[0].message.content)
-    
-    # Safely extract with 'Unknown' defaults
-    pol = extracted.get('pol', 'Unknown')
-    pod = extracted.get('pod', 'Unknown')
-    commodity = extracted.get('commodity', 'Unknown')
-    
-    if pol != 'Unknown' and pod != 'Unknown':
-        rates = search_rates(pol, pod)
-        if rates:
-            margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
-            inq_number = generate_next_inquiry_number()
-            
-            # Group by vehicle type and pick lowest price for each
-            best_rates_by_type = {}
-            for r in rates:
-                v_type = r['vehicle']
-                if v_type not in best_rates_by_type or r['price'] < best_rates_by_type[v_type]['price']:
-                    best_rates_by_type[v_type] = r
-            
-            # Construct multi-equipment response
-            rates_text = ""
-            for v_type, rate in best_rates_by_type.items():
-                sell_price = rate['price'] * (1 + (margin_pct / 100))
-                rates_text += (
-                    f"📦 *Equipment:* {v_type}\n"
-                    f"💰 *Ocean Freight:* USD {sell_price:.2f}\n"
-                    f"⏱️ *Transit Time:* {rate['transit_time']}\n"
-                    f"🗺️ *Routing:* {rate['route']}\n"
-                    f"⏳ *Valid until:* {rate['validity_date']}\n\n"
-                )
-            
-            reply = (
-                f"🚢 *Quotation: {rates[0]['pol']} ➡️ {rates[0]['pod']}*\n\n"
-                f"{rates_text}"
-                f"🏢 *Vendor:* {rates[0]['vendor']}\n"
-                f"Ref: {inq_number}"
-            )
-            return reply, extracted
-            
-    return None, extracted
-
-def process_image_inquiry(image_bytes_list):
-    """Analyzes multiple images using GPT-4o-vision. Returns extracted JSON."""
-    system_prompt = (
-        "You are an expert freight forwarder AI. Output strictly valid JSON with EXACTLY these keys: "
-        "'shipper', 'pol', 'pod', 'commodity', 'equipment_type', 'weight', 'readiness'. "
-        "Do not alter these key names. If data is missing, return 'Unknown'."
-    )
-    content = [{"type": "text", "text": system_prompt}]
-    
-    for img_bytes in image_bytes_list:
-        base64_image = base64.b64encode(img_bytes).decode('utf-8')
-        content.append({
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/jpeg;base64,{base64_image}"
-            }
-        })
-    
-    response = client.chat.completions.create(
+        
         model="gpt-4o",
         messages=[{"role": "user", "content": content}],
         response_format={ "type": "json_object" }

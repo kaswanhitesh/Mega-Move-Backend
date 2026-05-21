@@ -262,7 +262,7 @@ def search_rates(pol, pod):
 
 def process_inquiry(text):
     """Analyzes text to find rates. Returns (reply_text, extracted_details)."""
-    prompt = f"Extract freight details from this WhatsApp message. Return JSON: pol, pod, commodity. JSON only.\n\nMessage: {text}"
+    prompt = f"Extract freight details from this WhatsApp message. Return JSON: pol, pod, commodity, dimensions, weight. JSON only.\n\nMessage: {text}"
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "system", "content": "You are a specialized logistics parser. Output ONLY valid JSON."},
@@ -665,13 +665,35 @@ def process_whatsapp_message(payload):
                 handle_confirmation(text, from_number)
                 return
 
-            # 1. Quote First logic
+            # 1. AI Extraction
             reply, extracted = process_inquiry(text)
+            
+            # 2. PROJECT CARGO / OOG DETECTION
+            commodity = str(extracted.get('commodity', '')).title()
+            if any(k in commodity for k in ["Crane", "Excavator", "Machine", "Oog"]):
+                inq_number = generate_next_inquiry_number()
+                enquiry_data = {
+                    "Deal_Name": inq_number,
+                    "Stage": "Qualification",
+                    "Type": "Project Cargo",
+                    "Description": f"Detected Project Cargo (OOG)\nRoute: {extracted.get('pol')} to {extracted.get('pod')}\nCommodity: {commodity}\nDimensions: {extracted.get('dimensions', 'N/A')}\nWeight: {extracted.get('weight', 'N/A')}\nSource: WhatsApp"
+                }
+                
+                PENDING_TASKS[from_number] = {
+                    'action': 'log_enquiry',
+                    'description': f"log this priority OOG inquiry for {commodity}",
+                    'data': enquiry_data
+                }
+                
+                send_whatsapp_message(from_number, "I have detected a Project Cargo/OOG inquiry. I am logging this as a priority inquiry for our operations team. Shall I confirm and send this to the team?")
+                return
+
+            # 3. Standard Quote First logic
             if reply:
                 send_whatsapp_message(from_number, reply)
                 return
                 
-            # 2. Fallback to Greetings or Enquiry Logging
+            # 4. Fallback to Greetings or Enquiry Logging
             if text in ["hi", "hello", "hey"]:
                 send_whatsapp_message(from_number, "👋 Hello! I am the Mega Move AI. Send me a rate sheet or an inquiry to get started.")
             else:

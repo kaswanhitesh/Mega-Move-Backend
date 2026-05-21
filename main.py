@@ -174,39 +174,96 @@ def process_email_rfq(payload):
         sender_email = payload.get("sender", "Client")
         subject = payload.get("subject", "No Subject")
         
-        prompt = f"Extract freight details from this email. Return JSON: pol, pod, commodity, container_type, weight. JSON only.\n\nSubject: {subject}\nBody: {email_body}"
+        prompt = f"""
+        Analyze this forwarded freight request email.
+        Ignore the person who forwarded it. Find the ORIGINAL requester's details inside the body.
+        Extract the following and return strictly valid JSON:
+        - pol: Port of Loading
+        - pod: Port of Discharge
+        - container_type: Equipment requested (e.g., '10 x 20', 'FCL', etc.)
+        - incoterms: If mentioned (e.g., 'FOB')
+        - commodity: If mentioned
+        - original_company: The company actually requesting the quote (e.g., look for 'Requested by:')
+        - original_email: The email of the original requester (e.g., look for 'Requested by:')
+        - lead_source: The platform this came from (e.g., if 'All Forward' is in the text, use 'All Forward Network'. Otherwise use 'Email/Direct')
+        
+        Subject: {subject}
+        Body: {email_body}
+        """
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "system", "content": "You are a logistics parser. Output only valid JSON."},{"role": "user", "content": prompt}],
+            messages=[{"role": "system", "content": "You are a precise logistics parser. Output only valid JSON."},{"role": "user", "content": prompt}],
             response_format={ "type": "json_object" }
         )
         extracted = json.loads(response.choices[0].message.content)
+        
         pol = extracted.get('pol')
         pod = extracted.get('pod')
+        company_name = extracted.get('original_company') or "Unknown Company"
+        contact_email = extracted.get('original_email') or sender_email
+        source = extracted.get('lead_source', 'Email')
         
         if pol and pod:
+            access_token = get_zoho_access_token()
+            headers = {"Authorization": f"Zoho-oauthtoken {access_token}", "Content-Type": "application/json"}
+            
+            contact_id = None
+            account_id = None
+            
+            search_url = f"https://www.zohoapis.in/crm/v3/Contacts/search?email={contact_email}"
+            search_res = requests.get(search_url, headers=headers)
+            
+            if search_res.status_code == 200 and search_res.json().get("data"):
+                contact_id = search_res.json()["data"][0]["id"]
+                if "Account_Name" in search_res.json()["data"][0] and search_res.json()["data"][0]["Account_Name"]:
+                     account_id = search_res.json()["data"][0]["Account_Name"]["id"]
+            else:
+                contact_payload = {
+                    "data": [{
+                        "Last_Name": company_name,
+                        "Email": contact_email,
+                        "Lead_Source": source,
+                        "Account_Name": {"name": company_name}
+                    }]
+                }
+                contact_create_res = requests.post("https://www.zohoapis.in/crm/v3/Contacts", json=contact_payload, headers=headers)
+                if contact_create_res.status_code in [200, 201] and contact_create_res.json().get("data"):
+                     contact_id = contact_create_res.json()["data"][0]["details"]["id"]
+            
             inq_number = generate_next_inquiry_number()
             
-            push_to_zoho_crm("Deals", [{
+            deal_data = {
                 "Deal_Name": inq_number,
                 "Stage": "Qualification",
-                "Description": f"Route: {pol} to {pod}\nCommodity: {extracted.get('commodity')}\nContainer: {extracted.get('container_type')}\nReceived From: {sender_email}"
-            }])
+                "POL": pol,
+                "POD": pod,
+                "Container_Type": extracted.get('container_type'),
+                "Incoterms": extracted.get('incoterms'),
+                "Lead_Source": source,
+                "Description": f"Commodity: {extracted.get('commodity')}\nRequested via: {source}"
+            }
             
-            alert_msg = f"📧 *New Email RFQ Processed*\n\nID: {inq_number}\nFrom: {sender_email}\nRoute: {pol} ➡️ {pod}\n\nI have logged this in Zoho CRM as a new Inquiry."
+            if contact_id:
+                deal_data["Contact_Name"] = {"id": contact_id}
+            if account_id:
+                deal_data["Account_Name"] = {"id": account_id}
+                
+            push_to_zoho_crm("Deals", [deal_data])
+            
+            alert_msg = f"📧 *New {source} RFQ Processed*\n\nID: {inq_number}\nCompany: {company_name}\nRoute: {pol} ➡️ {pod}\nEquipment: {extracted.get('container_type')}\n\nContact created/updated and Deal mapped in Zoho CRM."
             
             best_rate = search_lowest_rate(pol, pod)
             if best_rate:
                 margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
                 sell_price = best_rate['price'] * (1 + (margin_pct / 100))
                 pdf_bytes = generate_quotation_pdf(inq_number, pol, pod, best_rate['vehicle'], sell_price)
-                alert_msg += f"\n\n✅ I also found a rate and generated a quotation."
+                alert_msg += f"\n\n✅ Found rate and generated quotation."
                 
                 my_number = os.getenv("YOUR_WHATSAPP_NUMBER")
                 if my_number:
                     upload_and_send_pdf(my_number, pdf_bytes, f"{inq_number}.pdf", alert_msg)
             else:
-                alert_msg += f"\n\n⚠️ No valid rates found for this route."
+                alert_msg += f"\n\n⚠️ No valid rates found in system."
                 my_number = os.getenv("YOUR_WHATSAPP_NUMBER")
                 if my_number:
                     send_whatsapp_message(my_number, alert_msg)

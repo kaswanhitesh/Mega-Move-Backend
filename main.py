@@ -297,6 +297,18 @@ def check_vendor_bill_mismatches():
                         })
     return mismatches
 
+def format_inr(number):
+    """Formats a number as INR string using the Indian numbering system (Lakhs/Crores)."""
+    try:
+        is_negative = number < 0
+        number = abs(number)
+        s, *d = str(f"{number:.2f}").partition(".")
+        r = ",".join([s[x-2:x] for x in range(-3, -len(s), -2)][::-1] + [s[-3:]])
+        result = f"₹ {r}{d[0]}{d[1]}"
+        return f"-{result}" if is_negative else result
+    except:
+        return f"₹ {number:,.2f}"
+
 def get_fy_start():
     """Calculates the start of the Indian Financial Year (April 1st)."""
     now = datetime.now()
@@ -1113,9 +1125,9 @@ async def process_whatsapp_message(payload):
                     f"• Shipments Booked (Won): {crm['booked']}\n"
                     f"• Sales Conversion Rate: {crm['conversion']:.1f}%\n\n"
                     f"💼 *Financial Health:*\n"
-                    f"• Total Invoice Revenue: USD {fin['revenue']:,.2f}\n"
-                    f"• Total Operational Costs: USD {fin['costs']:,.2f}\n"
-                    f"• Projected Net Margin: *{fin['profit']:,.2f}*\n\n"
+                    f"• Total Invoice Revenue: {format_inr(fin['revenue'])}\n"
+                    f"• Total Operational Costs: {format_inr(fin['costs'])}\n"
+                    f"• Projected Net Margin: *{format_inr(fin['profit'])}*\n\n"
                     f"🛠️ *Operations:*\n"
                     f"• Pending Carrier Bookings: Check Zoho Tasks"
                 )

@@ -20,12 +20,14 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
+import glob
 
 # --- GLOBAL STATE ---
 PENDING_TASKS = {}
 PROCESSED_MESSAGE_IDS = set()
 LAST_CLEANUP = datetime.now()
 IMAGE_BUFFER = {}
+GLOBAL_PORT_ALIASES = {}
 
 async def run_daily_financial_audit():
     """Executes overdue invoice checks and vendor bill mismatch audits."""
@@ -72,6 +74,43 @@ async def run_daily_financial_audit():
 async def lifespan(app: FastAPI):
     # Startup logic here
     print("Mega Move AI Backend Starting Up...")
+
+    # 1. AUTO-BUILD UN/LOCODE DATABASE
+    global GLOBAL_PORT_ALIASES
+    ports_file = "ports.json"
+    if not os.path.exists(ports_file):
+        print("DEBUG: ports.json missing. Building from UN/LOCODE CSVs...")
+        try:
+            csv_files = glob.glob("UNLOCODE CodeListPart*.csv")
+            all_ports = {}
+            for f in csv_files:
+                # UN/LOCODE CSVs often lack standard headers
+                df = pd.read_csv(f, header=None, encoding='latin1')
+                for _, row in df.iterrows():
+                    try:
+                        country = str(row[1])
+                        loc = str(row[2])
+                        name = str(row[3])
+                        func = str(row[7])
+                        if '1' in func: # Maritime Port
+                            locode = f"{country}{loc}"
+                            all_ports[locode] = [name, locode, loc]
+                    except:
+                        continue
+            with open(ports_file, "w") as pf:
+                json.dump(all_ports, pf)
+            print(f"DEBUG: Successfully built {ports_file} with {len(all_ports)} ports.")
+        except Exception as e:
+            print(f"CRITICAL: Failed to build port database: {e}")
+
+    # 2. LOAD DATABASE
+    try:
+        if os.path.exists(ports_file):
+            with open(ports_file, "r") as pf:
+                GLOBAL_PORT_ALIASES = json.load(pf)
+            print(f"DEBUG: Loaded {len(GLOBAL_PORT_ALIASES)} ports into memory.")
+    except Exception as e:
+        print(f"ERROR: Failed to load ports.json: {e}")
     
     # Initialize and Start Scheduler for Financial Audits
     scheduler = AsyncIOScheduler()
@@ -95,64 +134,38 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Mega Move AI Backend", lifespan=lifespan)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# --- MASTER CONFIGURATION ---
-PORT_ALIASES = {
-    "JNPT": "Nhava Sheva",
-    "INNSA": "Nhava Sheva",
-    "JEA": "Jebel Ali",
-    "AEJEA": "Jebel Ali",
-    "SHA": "Shanghai",
-    "CNSHA": "Shanghai",
-    "NSA": "Nhava Sheva",
-    "MUNDRA": "Mundra",
-    "INMUN": "Mundra",
-    "JEBEL ALI": "Jebel Ali",
-    "DXB": "Dubai",
-    "AEDXB": "Dubai"
-}
-
-def normalize_port_name(raw_name):
-    if not raw_name:
-        return raw_name
+def standardize_port_name(raw_port):
+    """Standardizes port names using the UN/LOCODE global database and RapidFuzz."""
+    if not raw_port:
+        return raw_port
     
     # STEP 1: NORMALIZATION PIPELINE
-    # 1.1 Convert to uppercase
-    name = str(raw_name).upper()
-    
-    # 1.2 Replace punctuation (commas, slashes) with spaces
+    name = str(raw_port).upper()
     name = re.sub(r'[,/]', ' ', name)
-    
-    # 1.3 Strip noise words
     noise_words = ["PORT", "TERMINAL", "WHARF", "CHINA", "INDIA", "UAE"]
     for word in noise_words:
-        # Use regex to replace only full words to avoid partial matches (e.g., "PORT SAID")
         name = re.sub(rf'\b{word}\b', '', name)
-    
-    # 1.4 Clean extra whitespace
     name = re.sub(r'\s+', ' ', name).strip()
 
     if not name:
-        return raw_name
+        return raw_port.title().strip()
 
-    # STEP 2: ALIAS CHECK
-    if name in PORT_ALIASES:
-        return PORT_ALIASES[name]
-
-    # STEP 3: RAPIDFUZZ MATCHING
-    standard_names = list(set(PORT_ALIASES.values()))
-    result = process.extractOne(name, standard_names, scorer=fuzz.token_sort_ratio)
-    
-    if result:
-        matched_name, score, _ = result
+    # STEP 2: RAPIDFUZZ MATCHING AGAINST GLOBAL DATABASE
+    if GLOBAL_PORT_ALIASES:
+        # Match against values (port names)
+        port_names = [v[0] for v in GLOBAL_PORT_ALIASES.values()]
+        result = process.extractOne(name, port_names, scorer=fuzz.token_sort_ratio)
         
-        # STEP 4: THRESHOLD LOGIC
-        if score > 90:
-            return matched_name
-        elif score >= 70:
-            print(f"REVIEW_REQUIRED: '{raw_name}' matched with '{matched_name}' at {score:.1f}%")
-            return matched_name
-            
+        if result:
+            matched_name, score, _ = result
+            if score >= 85:
+                return matched_name.title()
+
     return name.title()
+
+def normalize_port_name(raw_name):
+    # Wrapper for backward compatibility
+    return standardize_port_name(raw_name)
 
 @app.get("/")
 def read_root():
@@ -763,7 +776,7 @@ def process_inquiry_email(raw_data, wa_id=None):
             send_whatsapp_message(wa_id, f"❌ *Error parsing inquiry:* {str(e)}")
         return f"Error processing inquiry: {e}"
 
-def generate_quotation_pdf(inq_number, pol, pod, equipment, sell_price):
+def generate_quotation_pdf(inq_number, pol, pod, equipment, sell_price, local_charges=None):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
@@ -783,9 +796,23 @@ def generate_quotation_pdf(inq_number, pol, pod, equipment, sell_price):
     pdf.cell(50, 10, txt="Equipment:", ln=0)
     pdf.set_font("Arial", size=12)
     pdf.cell(150, 10, txt=str(equipment), ln=1)
+    
+    if local_charges:
+        pdf.ln(5)
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(200, 10, txt="Origin Local Charges:", ln=1)
+        pdf.set_font("Arial", size=10)
+        # Filter and display relevant local charges
+        relevant_keys = ["THC_20", "THC_40", "BL_Fee", "Seal_Charge", "Toll", "MUC"]
+        for key in relevant_keys:
+            val = local_charges.get(key)
+            if val and val != "0":
+                label = key.replace("_", " ")
+                pdf.cell(200, 8, txt=f"• {label}: {val}", ln=1)
+
     pdf.ln(10)
     pdf.set_font("Arial", 'B', 14)
-    pdf.cell(200, 10, txt=f"Total Sell Price: USD {sell_price:.2f}", ln=1, align='L')
+    pdf.cell(200, 10, txt=f"Total Sell Price: {sell_price}", ln=1, align='L')
     pdf.ln(20)
     pdf.set_font("Arial", 'B', 10)
     pdf.cell(200, 10, txt="Terms & Conditions:", ln=1, align='L')
@@ -800,6 +827,57 @@ def generate_quotation_pdf(inq_number, pol, pod, equipment, sell_price):
     pdf.output(file_path)
     with open(file_path, "rb") as f:
         return f.read()
+
+def fetch_local_charges(carrier_name):
+    """Queries Zoho CRM for standard local charges for a carrier."""
+    access_token = get_zoho_access_token()
+    # Search in Local_Charges_Tariff module
+    url = f"https://www.zohoapis.in/crm/v3/Local_Charges_Tariff/search?criteria=(Carrier_Name:equals:{carrier_name})"
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    res = requests.get(url, headers=headers)
+    if res.status_code == 200 and res.json().get("data"):
+        return res.json()["data"][0]
+    return None
+
+def process_local_charges_pdf(file_bytes, wa_id=None):
+    """Parses local charges from a PDF and pushes to Zoho CRM."""
+    try:
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+        raw_text = "".join([page.extract_text() for page in pdf_reader.pages])
+
+        system_prompt = (
+            "You are an expert pricing analyst. Extract the standard local charges from this carrier tariff. "
+            "Identify the Carrier Name. Extract the standard export local charges, noting different currencies. "
+            "We need: THC (20ft Standard), THC (40ft Standard), BL Fee/Doc Fee, Seal Charge, Toll, and MUC. "
+            "Output strictly as JSON: {'carrier': '...', 'thc_20': '...', 'thc_40': '...', 'bl_fee': '...', 'seal_charge': '...', 'toll': '...', 'muc': '...'}"
+        )
+        
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "system", "content": system_prompt},
+                      {"role": "user", "content": f"TARIFF DATA:\n{raw_text[:10000]}"}],
+            response_format={ "type": "json_object" }
+        )
+        data = json.loads(response.choices[0].message.content)
+        
+        # Push to Zoho CRM
+        push_to_zoho_crm("Local_Charges_Tariff", [{
+            "Carrier_Name": data.get("carrier"),
+            "THC_20": data.get("thc_20"),
+            "THC_40": data.get("thc_40"),
+            "BL_Fee": data.get("bl_fee"),
+            "Seal_Charge": data.get("seal_charge"),
+            "Toll": data.get("toll"),
+            "MUC": data.get("muc")
+        }])
+        
+        if wa_id:
+            send_whatsapp_message(wa_id, f"✅ *Local Charges Updated* for {data.get('carrier')}. Ready for relational pricing.")
+            
+    except Exception as e:
+        print(f"Local Charges Error: {e}")
+        if wa_id:
+            send_whatsapp_message(wa_id, f"❌ *Error parsing local charges:* {str(e)}")
 
 # --- RATE SHEET PROCESSING ---
 def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
@@ -1123,12 +1201,12 @@ async def process_whatsapp_message(payload):
 
         from_number = message.get("from")
         
-        # 1. HANDLE FILES (Rate Sheets)
+        # 1. HANDLE FILES (Rate Sheets or Tariffs)
         if message.get("type") == "document":
             doc = message.get("document")
             media_id = doc.get("id")
             filename = doc.get("filename")
-            caption = doc.get("caption", "")
+            caption = str(doc.get("caption", "")).lower()
             print(f"Received document: {filename} with caption: '{caption}'")
             
             access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
@@ -1137,6 +1215,12 @@ async def process_whatsapp_message(payload):
             media_url = media_url_res.json().get("url")
             file_bytes = requests.get(media_url, headers={"Authorization": f"Bearer {access_token}"}).content
             
+            # RELATIONAL PRICING: Check for Local Charges Tariff
+            if "local charges" in caption or "tariff" in caption:
+                send_whatsapp_message(from_number, "📄 *Local Charges Tariff Received.* Analyzing Carrier and standardizing fees...")
+                background_tasks.add_task(process_local_charges_pdf, file_bytes, from_number)
+                return
+
             vendor_name = filename.split(" ")[0] if " " in filename else "WhatsApp Vendor"
             status = process_rate_sheet(file_bytes, filename, vendor_name, from_number)
             send_whatsapp_message(from_number, status)
@@ -1285,12 +1369,27 @@ async def process_whatsapp_message(payload):
                     return
                 
                 best = rates[0]
+                
+                # RELATIONAL PRICING: Fetch Local Charges for the Carrier
+                lc_data = fetch_local_charges(best['vendor'])
+                lc_str = "Not on file, check manually"
+                if lc_data:
+                    lc_items = []
+                    # Logic to pick 20ft vs 40ft THC
+                    is_40 = '40' in best['vehicle']
+                    thc = lc_data.get('THC_40') if is_40 else lc_data.get('THC_20')
+                    if thc: lc_items.append(f"THC: {thc}")
+                    if lc_data.get('BL_Fee'): lc_items.append(f"BL: {lc_data.get('BL_Fee')}")
+                    if lc_data.get('Seal_Charge'): lc_items.append(f"Seal: {lc_data.get('Seal_Charge')}")
+                    lc_str = " | ".join(lc_items)
+
                 msg = (
                     f"📊 *Rates Found for {inq_number}*\n"
                     f"Route: {pol} ➡️ {pod}\n"
-                    f"Vendor: {best['vendor']}\n"
-                    f"Base O/F: {best['price']}\n"
-                    f"Transit: {best['transit_time']}\n"
+                    f"Vendor: {best['vendor']}\n\n"
+                    f"🌊 Base O/F: {best['price']}\n"
+                    f"🏗️ Local Charges (Origin): {lc_str}\n"
+                    f"⏱️ Transit: {best['transit_time']}\n"
                     f"Free Time: {best['free_time']}\n\n"
                     f"Reply *QUOTE {inq_number}* to draft the PDF."
                 )
@@ -1309,9 +1408,15 @@ async def process_whatsapp_message(payload):
                 rates = search_rates(pol, pod)
                 if not rates: return
                 best = rates[0]
+                
+                # RELATIONAL PRICING: Fetch local charges for the PDF
+                lc_data = fetch_local_charges(best['vendor'])
+                
                 margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
-                sell_price = best['price'] * (1 + (margin_pct / 100))
-                pdf_bytes = generate_quotation_pdf(inq_number, pol, pod, best['vehicle'], sell_price)
+                sell_price_val = best['price'] * (1 + (margin_pct / 100))
+                sell_price = f"USD {sell_price_val:.2f}"
+                
+                pdf_bytes = generate_quotation_pdf(inq_number, pol, pod, best['vehicle'], sell_price, local_charges=lc_data)
                 caption = f"📄 *Draft Quote Ready* for {inq_number}. Reply *SEND {inq_number}* to email client."
                 upload_and_send_pdf(from_number, pdf_bytes, f"{inq_number}.pdf", caption)
                 return

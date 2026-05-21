@@ -168,6 +168,27 @@ async def verify_whatsapp(request: Request):
 @app.post("/whatsapp-webhook")
 async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
+    
+    # 0. IDEMPOTENCY CHECK (Instant return for retries)
+    try:
+        entries = payload.get("entry", [])
+        if entries:
+            changes = entries[0].get("changes", [])
+            if changes:
+                value = changes[0].get("value", {})
+                messages = value.get("messages", [])
+                if messages:
+                    message_id = messages[0].get("id")
+                    if message_id in PROCESSED_MESSAGE_IDS:
+                        print(f"DEBUG: Ignoring duplicate message_id: {message_id}")
+                        return {"status": "ignored_duplicate"}
+                    
+                    # Add to cache and proceed
+                    PROCESSED_MESSAGE_IDS.add(message_id)
+    except Exception as e:
+        print(f"Idempotency Check Error: {e}")
+
+    # Process everything in the background to ensure Meta gets a 200 OK instantly
     background_tasks.add_task(process_whatsapp_message, payload)
     return {"status": "success"}
 
@@ -429,14 +450,24 @@ def search_rates(pol, pod):
 
 def process_inquiry(text):
     """Analyzes text to find rates. Returns (reply_text, extracted_details)."""
-    prompt = f"Extract freight details from this WhatsApp message. Return JSON: pol, pod, commodity, dimensions, weight. JSON only.\n\nMessage: {text}"
+    system_prompt = (
+        "You are an expert freight forwarder AI. Extract the routing and cargo details into JSON. "
+        "Keys: pol, pod, commodity, equipment_type, weight, cargo_category. "
+        "For 'equipment_type', explicitly capture standard containers (e.g., 20DC, 40HC), "
+        "AND special equipment (Flat Racks, Open Tops, Flatbeds, Breakbulk, RoRo). "
+        "For 'cargo_category', classify as 'General', 'Hazardous', 'Perishable', or 'Project Cargo/OOG'."
+    )
+    prompt = f"Message: {text}"
     response = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": "You are a specialized logistics parser. Output ONLY valid JSON."},
+        messages=[{"role": "system", "content": system_prompt},
                   {"role": "user", "content": prompt}],
         response_format={ "type": "json_object" }
     )
     extracted = json.loads(response.choices[0].message.content)
+    # Map for backward compatibility with downstream functions
+    extracted['pol'] = extracted.get('pol')
+    extracted['pod'] = extracted.get('pod')
     pol, pod = extracted.get('pol'), extracted.get('pod')
     
     if pol and pod:
@@ -476,7 +507,15 @@ def process_inquiry(text):
 
 def process_image_inquiry(image_bytes_list):
     """Analyzes multiple images using GPT-4o-vision. Returns extracted JSON."""
-    content = [{"type": "text", "text": "Analyze these screenshots. Extract the Shipper Name, POL, POD, Cargo Details (specifically model, qty, and dimensions), and Readiness date. Return the output as a JSON object."}]
+    system_prompt = (
+        "You are an expert freight forwarder AI analyzing screenshots of inquiry emails. "
+        "Extract the Shipper Name, POL, POD, Cargo Details, and Readiness date into JSON. "
+        "Keys: pol, pod, commodity, equipment_type, weight, cargo_category, shipper, readiness. "
+        "For 'equipment_type', explicitly capture standard containers (e.g., 20DC, 40HC), "
+        "AND special equipment (Flat Racks, Open Tops, Flatbeds, Breakbulk, RoRo). "
+        "For 'cargo_category', classify as 'General', 'Hazardous', 'Perishable', or 'Project Cargo/OOG'."
+    )
+    content = [{"type": "text", "text": system_prompt}]
     
     for img_bytes in image_bytes_list:
         base64_image = base64.b64encode(img_bytes).decode('utf-8')
@@ -507,21 +546,17 @@ def classify_pdf_content(raw_data):
 def process_inquiry_email(raw_data, wa_id=None):
     """Parses inquiry details from a document and logs to Zoho 'New Enquiries'."""
     try:
-        prompt = """
-        ACT AS AN EXPERT LOGISTICS PARSER.
-        Extract the following details from this inquiry document:
-        - Shipper Name
-        - POL (Port of Loading)
-        - POD (Port of Discharge)
-        - Cargo Specifications (specifically mention if Cranes, dimensions, weight)
-        - Incoterms
-        
-        Return ONLY valid JSON.
-        """
+        system_prompt = (
+            "You are an expert freight forwarder AI. Extract inquiry details from the provided document data into JSON. "
+            "Keys: shipper, pol, pod, commodity, equipment_type, weight, cargo_category, incoterms. "
+            "For 'equipment_type', explicitly capture standard containers (e.g., 20DC, 40HC), "
+            "AND special equipment (Flat Racks, Open Tops, Flatbeds, Breakbulk, RoRo). "
+            "For 'cargo_category', classify as 'General', 'Hazardous', 'Perishable', or 'Project Cargo/OOG'."
+        )
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "system", "content": "You are a precise logistics parser. Output only valid JSON."},
-                      {"role": "user", "content": f"{prompt}\n\nDATA:\n{raw_data[:10000]}"}],
+            messages=[{"role": "system", "content": system_prompt},
+                      {"role": "user", "content": f"DATA:\n{raw_data[:10000]}"}],
             response_format={ "type": "json_object" }
         )
         extracted = json.loads(response.choices[0].message.content)
@@ -606,22 +641,23 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         
         if doc_type == 'INQUIRY_EMAIL':
             if wa_id:
-                send_whatsapp_message(wa_id, "🔍 *Detected:* Inquiry Email. Processing as lead...")
+                send_whatsapp_message(wa_id, "🔍 *Detected:* Inquiry Email. Processing Inquiry...")
             return process_inquiry_email(raw_data, wa_id)
 
         # 2. CONTINUING AS VENDOR_RATE_SHEET
         # UNIVERSAL PARSING PROMPT - CALIBRATED FOR COMPLEX LOGISTICS EDGE CASES
+        system_prompt = (
+            "You are an expert logistics data engineer. Convert messy vendor rate sheets into structured JSON. "
+            "Standardize types to '20ft' or '40ft' and handle row splitting for multi-column price sheets."
+        )
         prompt = f"""
-        ACT AS AN EXPERT LOGISTICS DATA ENGINEER. 
-        Your task is to convert messy vendor rate sheets into structured JSON.
-        
         VENDOR NAME: PIL (INDIA) PVT. LTD
         FILE NAME: {filename}
 
         ### CORE EXTRACTION RULES:
         1. **POL INFERENCE (CRITICAL):** 
            - Logistics rates are often grouped under a Port of Loading (POL). 
-           - Look for POL in: Tab Names, Section Headers (e.g., "RATES FROM MUNDRA"), or the first column.
+           - Look for POL in: Tab Names, Section Headers (e.g., \"RATES FROM MUNDRA\"), or the first column.
            - If a POL is found at the top of a table/section, apply it to EVERY row in that section until a new POL is explicitly mentioned.
         
         2. **PRICE SCRUBBING & ROW SPLITTING:** 
@@ -629,36 +665,36 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
              - Entry 1: Container Type = '20ft', Price = [Value from the first price column].
              - Entry 2: Container Type = '40ft', Price = [Value from the second price column].
            - Extract ONLY the numeric base Ocean Freight as 'ocean_freight'. 
-           - Ignore surcharges, THC, documentation fees, or any text following symbols like "+", "&", "/", or "AND".
-           - Example: "$1200 + THC" -> 1200.
-           - Example: "Included" or "0" -> 0.0.
+           - Ignore surcharges, THC, documentation fees, or any text following symbols like \"+\", \"&\", \"/\", or \"AND\".
+           - Example: \"$1200 + THC\" -> 1200.
+           - Example: \"Included\" or \"0\" -> 0.0.
 
         3. **CONTAINER TYPE MAPPING:**
            - Standardize types strictly to '20ft' or '40ft' based on the column headers.
 
         4. **COMMODITY & HAZ:**
-           - If the row/column indicates "HAZ", "Hazardous", or "DG", append "(HAZ)" to the container_type.
+           - If the row/column indicates \"HAZ\", \"Hazardous\", or \"DG\", append \"(HAZ)\" to the container_type.
 
         5. **TRANSIT TIME & ROUTE (COLUMN ALIASES):**
-           - 'VIA' -> Use this for the 'route' column (e.g., "Direct", "via Singapore").
-           - 'Days' -> Use this for the 'transit_time' column (e.g., "15 Days").
+           - 'VIA' -> Use this for the 'route' column (e.g., \"Direct\", \"via Singapore\").
+           - 'Days' -> Use this for the 'transit_time' column (e.g., \"15 Days\").
            - 'Valid till' -> Use this for the 'validity_date' column.
 
         6. **VALIDITY SCAN:**
            - Return 'validity_date' in YYYY-MM-DD format. If not found, return null.
 
         ### OUTPUT FORMAT:
-        Return ONLY a JSON object with a "rates" key:
+        Return ONLY a JSON object with a \"rates\" key:
         {{
-          "rates": [
+          \"rates\": [
             {{
-              "pol": "Origin Port",
-              "pod": "Destination Port",
-              "container_type": "20ft or 40ft",
-              "ocean_freight": 0.0,
-              "transit_time": "Estimated Days",
-              "route": "Routing Details",
-              "validity_date": "YYYY-MM-DD or null"
+              \"pol\": \"Origin Port\",
+              \"pod\": \"Destination Port\",
+              \"container_type\": \"20ft or 40ft\",
+              \"ocean_freight\": 0.0,
+              \"transit_time\": \"Estimated Days\",
+              \"route\": \"Routing Details\",
+              \"validity_date\": \"YYYY-MM-DD or null\"
             }}
           ]
         }}
@@ -672,7 +708,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
 
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "system", "content": "You are a specialized logistics data parser. Output ONLY valid JSON."},
+            messages=[{"role": "system", "content": system_prompt},
                       {"role": "user", "content": prompt}],
             response_format={ "type": "json_object" }
         )
@@ -866,7 +902,6 @@ async def process_whatsapp_message(payload):
     global LAST_CLEANUP, PROCESSED_MESSAGE_IDS
     
     try:
-        # 0. IDEMPOTENCY CHECK (Prevent double processing on retries)
         entries = payload.get("entry", [])
         if not entries: return
         changes = entries[0].get("changes", [])
@@ -876,13 +911,6 @@ async def process_whatsapp_message(payload):
         if not messages: return
 
         message = messages[0]
-        message_id = message.get("id")
-        
-        if message_id in PROCESSED_MESSAGE_IDS:
-            print(f"Skipping already processed message: {message_id}")
-            return
-        
-        PROCESSED_MESSAGE_IDS.add(message_id)
 
         # 0.1 Periodic Cleanup of IDs (every 10 minutes)
         if (datetime.now() - LAST_CLEANUP).total_seconds() > 600:

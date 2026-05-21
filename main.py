@@ -256,7 +256,7 @@ def process_rate_sheet(file_content, filename, vendor_name):
                 "Subform_3": [
                     {
                         "Vendor_Name": carrier_name,
-                        "Ex_Work_Charges": price_val
+                        "Ex_Work_Charges": str(price_val)
                     }
                 ],
                 "Subform_2": [

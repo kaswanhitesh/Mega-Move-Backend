@@ -15,6 +15,9 @@ from rapidfuzz import process, fuzz
 app = FastAPI(title="Mega Move AI Backend")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# --- GLOBAL STATE ---
+PENDING_UPLOADS = {}
+
 # --- MASTER CONFIGURATION ---
 PORT_ALIASES = {
     "JNPT": "Nhava Sheva",
@@ -388,19 +391,20 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
             })
         
         if zoho_data:
-            try:
-                # Batch uploads in chunks of 50 to stay under Zoho's 100-record limit
-                batch_size = 50
-                for i in range(0, len(zoho_data), batch_size):
-                    batch = zoho_data[i : i + batch_size]
-                    push_to_zoho_crm("Pricings", batch)
-                
-                return f"Successfully processed {len(zoho_data)} rates for {vendor_name}."
-            except Exception as zoho_err:
-                print(f"CRITICAL ERROR: {str(zoho_err)}")
-                if wa_id:
-                    send_whatsapp_message(wa_id, f"❌ *Error:* Zoho API Failure - {str(zoho_err)}")
-                return f"⚠️ Zoho CRM Error: {str(zoho_err)}"
+            # SAVE TO MEMORY FOR HUMAN-IN-THE-LOOP CONFIRMATION
+            PENDING_UPLOADS[wa_id] = zoho_data
+            
+            unique_vendors = ", ".join(list(set([r.get("Name").split(" - ")[0] for r in zoho_data])))
+            summary = (
+                f"📊 *Extraction Complete!*\n\n"
+                f"Found {len(zoho_data)} total rates.\n"
+                f"Vendors: {unique_vendors}\n\n"
+                f"Reply *YES* to confirm and upload to Zoho, or *NO* to cancel."
+            )
+            if wa_id:
+                send_whatsapp_message(wa_id, summary)
+            return summary
+            
         return "No rates could be extracted."
 
     except Exception as e:
@@ -408,6 +412,40 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         if wa_id:
             send_whatsapp_message(wa_id, f"❌ *Error:* {str(e)}")
         return f"Error processing rate sheet: {e}"
+
+def handle_confirmation(text, sender_wa_id):
+    """Processes YES/NO confirmation for pending rate uploads."""
+    user_text = str(text).strip().upper()
+    
+    if user_text == "YES":
+        zoho_rates = PENDING_UPLOADS.get(sender_wa_id)
+        if not zoho_rates:
+            send_whatsapp_message(sender_wa_id, "⚠️ No pending upload found.")
+            return
+
+        send_whatsapp_message(sender_wa_id, "🚀 *Confirmed.* Pushing to Zoho CRM via Upsert...")
+        
+        try:
+            # Batch uploads in chunks of 50
+            batch_size = 50
+            for i in range(0, len(zoho_rates), batch_size):
+                batch = zoho_rates[i : i + batch_size]
+                push_to_zoho_crm("Pricings", batch)
+            
+            send_whatsapp_message(sender_wa_id, f"✅ *Success!* {len(zoho_rates)} rates uploaded to Zoho CRM.")
+            del PENDING_UPLOADS[sender_wa_id]
+        except Exception as e:
+            print(f"CRITICAL ERROR: {str(e)}")
+            send_whatsapp_message(sender_wa_id, f"❌ *Error during upload:* {str(e)}")
+            
+    elif user_text == "NO":
+        if sender_wa_id in PENDING_UPLOADS:
+            del PENDING_UPLOADS[sender_wa_id]
+            send_whatsapp_message(sender_wa_id, "🛑 *Upload cancelled.* Data cleared from memory.")
+        else:
+            send_whatsapp_message(sender_wa_id, "⚠️ No pending upload to cancel.")
+    else:
+        send_whatsapp_message(sender_wa_id, "🤔 I didn't understand that. Please reply *YES* to upload or *NO* to cancel.")
 
 # --- EMAIL PROCESSING LOGIC ---
 def process_email_rfq(payload):
@@ -531,6 +569,11 @@ def process_whatsapp_message(payload):
         elif message.get("type") == "text":
             text = message.get("text", {}).get("body", "").lower()
             
+            # CHECK FOR PENDING UPLOADS (Human-in-the-Loop)
+            if from_number in PENDING_UPLOADS:
+                handle_confirmation(text, from_number)
+                return
+
             if text in ["hi", "hello", "hey"]:
                 send_whatsapp_message(from_number, "👋 Hello! I am the Mega Move AI. Send me a rate sheet or an inquiry to get started.")
             else:

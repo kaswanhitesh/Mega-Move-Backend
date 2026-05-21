@@ -217,13 +217,15 @@ def send_whatsapp_message(to_number, text):
     requests.post(url, headers=headers, json=payload)
 
 def send_email_with_attachment(to_email, subject, body, pdf_bytes=None, filename=None):
-    """Sends an email using Zoho SMTP (or similar) with an optional attachment."""
+    """Sends an email using Zoho SMTP with an optional attachment and mandatory CC."""
     sender_email = os.getenv("ZOHO_EMAIL_ADDRESS")
     sender_password = os.getenv("ZOHO_EMAIL_PASSWORD")
+    cc_email = "hitesh@megamoveindia.com"
     
     msg = MIMEMultipart()
     msg['From'] = sender_email
     msg['To'] = to_email
+    msg['Cc'] = cc_email
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'plain'))
     
@@ -236,7 +238,8 @@ def send_email_with_attachment(to_email, subject, body, pdf_bytes=None, filename
         # Use Zoho SMTP settings (smtp.zoho.in for India orgs)
         with smtplib.SMTP_SSL('smtp.zoho.in', 465) as server:
             server.login(sender_email, sender_password)
-            server.send_message(msg)
+            # Explicitly route to both primary recipient and CC
+            server.send_message(msg, to_addrs=[to_email, cc_email])
         return True
     except Exception as e:
         print(f"SMTP Error: {e}")
@@ -987,11 +990,12 @@ def process_email_rfq(payload):
         sender_email = payload.get("sender", "Client")
         subject = payload.get("subject", "No Subject")
         
-        # 1. AI Parsing
+        # 1. AI Parsing (Upgraded to extract names)
         system_prompt = (
             "You are an expert freight forwarder AI. Output strictly valid JSON with EXACTLY these keys: "
-            "'pol', 'pod', 'equipment_type', 'commodity'. Do not alter these key names. "
-            "If data is missing, return 'Unknown'."
+            "'pol', 'pod', 'equipment_type', 'commodity', 'sender_first_name'. Do not alter these key names. "
+            "Also extract the sender's first name by looking at their signature or sign-off. "
+            "If you absolutely cannot find a name, return 'Customer'."
         )
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -1003,17 +1007,23 @@ def process_email_rfq(payload):
         pol = extracted.get('pol', 'Unknown')
         pod = extracted.get('pod', 'Unknown')
         equipment = extracted.get('equipment_type', 'Unknown')
+        first_name = extracted.get('sender_first_name', 'Customer')
+        
+        greeting = f"Hi {first_name}," if first_name != "Customer" else "Hi,"
 
-        # 2. Auto-Acknowledgement Email
+        # 2. Personalized Auto-Acknowledgement Email
         ack_body = (
-            "Hello,\n\n"
-            "Thank you for your inquiry regarding the shipment from {} to {}.\n"
-            "Our team is currently calculating the best possible route and rates for your {} shipment.\n"
-            "We will get back to you with an official quotation shortly.\n\n"
-            "Best Regards,\n"
-            "Mega Move Logistics Team".format(pol, pod, equipment)
+            f"{greeting}\n\n"
+            "thank you for your valuable query,\n"
+            "our team will start working on it and quote for the same shortly,\n"
+            "help us to serve you better\n\n"
+            "Thanks & Regards,\n"
+            "Vikas | Pricing Desk,\n"
+            "vikas.kaswan@megamoveindia.com | +91 9321399970\n"
+            "Mega Move India Private Limited,\n"
+            "www.megamoveindia.com"
         )
-        send_email_with_attachment(sender_email, "Re: {}".format(subject), ack_body)
+        send_email_with_attachment(sender_email, f"Re: {subject}", ack_body)
 
         # 3. Zoho CRM Deal Creation
         inq_number = generate_next_inquiry_number()

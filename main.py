@@ -75,33 +75,67 @@ async def lifespan(app: FastAPI):
     # Startup logic here
     print("Mega Move AI Backend Starting Up...")
 
-    # 1. AUTO-BUILD UN/LOCODE DATABASE
+    # 1. AUTO-BUILD UN/LOCODE DATABASE (Self-healing & Bulletproof)
     global GLOBAL_PORT_ALIASES
     ports_file = "ports.json"
     if not os.path.exists(ports_file):
         print("DEBUG: ports.json missing. Building from UN/LOCODE CSVs...")
-        try:
-            csv_files = glob.glob("UNLOCODE CodeListPart*.csv")
-            all_ports = {}
-            for f in csv_files:
-                # UN/LOCODE CSVs often lack standard headers
-                df = pd.read_csv(f, header=None, encoding='latin1')
-                for _, row in df.iterrows():
+        ports_db = {}
+        csv_files = glob.glob("*.csv")
+
+        for f in csv_files:
+            if "subdivision" in f.lower():
+                continue
+            # Try different combinations of encodings and separators
+            for encoding in ["latin-1", "utf-8", "cp1252"]:
+                for sep in [",", ";"]:
                     try:
-                        country = str(row[1])
-                        loc = str(row[2])
-                        name = str(row[3])
-                        func = str(row[7])
-                        if '1' in func: # Maritime Port
-                            locode = f"{country}{loc}"
-                            all_ports[locode] = [name, locode, loc]
+                        df = pd.read_csv(f, sep=sep, encoding=encoding, keep_default_na=False, dtype=str)
+                        if df.shape[1] < 4:
+                            continue  # Wrong separator, try next
+                        
+                        # Dynamically locate columns based on expected positional content
+                        col_country, col_loc, col_name, col_func = None, None, None, None
+                        
+                        for col in df.columns:
+                            col_str = str(col).lower()
+                            if "country" in col_str: col_country = col
+                            elif "location" in col_str: col_loc = col
+                            elif "namewodiacritics" in col_str: col_name = col
+                            elif "name" in col_str and not col_name: col_name = col
+                            elif "function" in col_str: col_func = col
+                        
+                        # Positional fallback if columns are completely headerless
+                        if not col_country or not col_loc or not col_func:
+                            for col in df.columns:
+                                sample = df[col].head(30).tolist()
+                                if any(re.match(r"^[A-Z]{2}$", str(x)) for x in sample if x): col_country = col
+                                if any(re.match(r"^[A-Z2-9]{3}$", str(x)) for x in sample if x): col_loc = col
+                                if any(str(x).startswith("1") for x in sample if x): col_func = col
+                            if df.shape[1] >= 4 and not col_name:
+                                col_name = df.columns[3]
+
+                        if col_country and col_loc and col_func:
+                            for _, row in df.iterrows():
+                                func_val = str(row[col_func]).strip()
+                                # A '1' in the first index or within the string means it's a maritime seaport
+                                if func_val and (func_val.startswith("1") or "1" in func_val):
+                                    country = str(row[col_country]).strip().upper()
+                                    loc = str(row[col_loc]).strip().upper()
+                                    name = str(row[col_name]).strip()
+                                    if len(country) == 2 and len(loc) == 3:
+                                        locode = f"{country}{loc}"
+                                        ports_db[locode] = [name, locode, loc]
+                            break  # Successfully parsed this file, move to next file
                     except:
                         continue
-            with open(ports_file, "w") as pf:
-                json.dump(all_ports, pf)
-            print(f"DEBUG: Successfully built {ports_file} with {len(all_ports)} ports.")
-        except Exception as e:
-            print(f"CRITICAL: Failed to build port database: {e}")
+
+        if ports_db:
+            with open(ports_file, "w") as jf:
+                json.dump(ports_db, jf, indent=4)
+            print(f"DEBUG: Successfully built ports.json with {len(ports_db)} maritime ports.")
+        else:
+            print("DEBUG: Parser ran but found no valid maritime port rows.")
 
     # 2. LOAD DATABASE
     try:
@@ -222,7 +256,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         return {"status": "success"} # Still return success to prevent retries on error
 
     # Process everything in the background to ensure Meta gets a 200 OK instantly
-    background_tasks.add_task(process_whatsapp_message, payload)
+    background_tasks.add_task(process_whatsapp_message, payload, background_tasks)
     return {"status": "success"}
 
 @app.post("/email-webhook")

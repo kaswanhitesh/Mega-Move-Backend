@@ -297,33 +297,71 @@ def check_vendor_bill_mismatches():
                         })
     return mismatches
 
-def get_crm_snapshot():
-    """Calculates CRM metrics: inquiries, bookings, and conversion rate for the last 30 days."""
-    access_token = get_zoho_access_token()
-    # Search for deals created in the last 30 days
-    url = "https://www.zohoapis.in/crm/v3/Deals/search?criteria=(Created_Time:between:2026-01-01T00:00:00+05:30,2026-12-31T23:59:59+05:30)" # Logic placeholder for date range
-    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-    res = requests.get(url, headers=headers)
+def get_fy_start():
+    """Calculates the start of the Indian Financial Year (April 1st)."""
+    now = datetime.now()
+    if now.month >= 4:
+        fy_start_year = now.year
+    else:
+        fy_start_year = now.year - 1
     
-    metrics = {"inquiries": 0, "booked": 0, "conversion": 0.0}
-    if res.status_code == 200 and res.json().get("data"):
-        deals = res.json()["data"]
-        metrics["inquiries"] = len(deals)
-        metrics["booked"] = len([d for d in deals if d.get("Stage") == "Closed Won"])
-        if metrics["inquiries"] > 0:
-            metrics["conversion"] = (metrics["booked"] / metrics["inquiries"]) * 100
-    return metrics
+    books_date = f"{fy_start_year}-04-01"
+    crm_date = f"{fy_start_year}-04-01T00:00:00+05:30"
+    fy_label = f"{fy_start_year}-{fy_start_year + 1}"
+    return books_date, crm_date, fy_label
 
-def get_financial_snapshot():
-    """Aggregates monthly revenue and costs from Zoho Books."""
+def get_crm_snapshot(period="FY"):
+    """Calculates CRM metrics: inquiries, bookings, and conversion rate."""
+    access_token = get_zoho_access_token()
+    books_start, crm_start, fy_label = get_fy_start()
+    
+    # Fetch deals - if FY, we iterate and break on older records for reliability
+    url = "https://www.zohoapis.in/crm/v3/Deals?sort_by=Created_Time&sort_order=desc"
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    
+    inquiries = 0
+    booked = 0
+    
+    page = 1
+    more_records = True
+    
+    while more_records:
+        res = requests.get(f"{url}&page={page}", headers=headers)
+        if res.status_code == 200 and res.json().get("data"):
+            deals = res.json()["data"]
+            for d in deals:
+                created_time = d.get("Created_Time")
+                if period == "FY" and created_time < crm_start:
+                    more_records = False
+                    break
+                
+                inquiries += 1
+                if d.get("Stage") == "Closed Won":
+                    booked += 1
+            
+            info = res.json().get("info", {})
+            if not info.get("more_records"):
+                more_records = False
+            page += 1
+        else:
+            more_records = False
+
+    conversion = (booked / inquiries * 100) if inquiries > 0 else 0.0
+    return {"inquiries": inquiries, "booked": booked, "conversion": conversion}
+
+def get_financial_snapshot(period="FY"):
+    """Aggregates revenue and costs from Zoho Books for a specific period."""
     access_token = get_zoho_access_token()
     org_id = os.getenv("ZOHO_BOOKS_ORG_ID")
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     
+    books_start, _, _ = get_fy_start()
+    date_filter = f"&date_start={books_start}" if period == "FY" else ""
+    
     # 1. Fetch Invoices for Revenue
-    inv_res = requests.get(f"https://www.zohoapis.in/books/v3/invoices?organization_id={org_id}", headers=headers)
+    inv_res = requests.get(f"https://www.zohoapis.in/books/v3/invoices?organization_id={org_id}{date_filter}", headers=headers)
     # 2. Fetch Bills for Costs
-    bill_res = requests.get(f"https://www.zohoapis.in/books/v3/bills?organization_id={org_id}", headers=headers)
+    bill_res = requests.get(f"https://www.zohoapis.in/books/v3/bills?organization_id={org_id}{date_filter}", headers=headers)
     
     revenue = 0.0
     costs = 0.0
@@ -332,7 +370,7 @@ def get_financial_snapshot():
     if bill_res.status_code == 200:
         costs = sum([float(b.get("total", 0)) for b in bill_res.json().get("bills", [])])
         
-    return {"revenue": revenue, "costs": costs, "profit": revenue - costs}
+    return {"revenue": float(revenue), "costs": float(costs), "profit": float(revenue - costs)}
 
 def get_zoho_access_token():
     url = "https://accounts.zoho.in/oauth/v2/token" 
@@ -1058,22 +1096,26 @@ async def process_whatsapp_message(payload):
                 return
 
             # --- EXECUTIVE DASHBOARD (PHASE 6) ---
-            if text_lower in ["metrics", "dashboard", "status"]:
-                print(f"DEBUG: Generating Executive Dashboard for Admin: {from_number}")
-                crm = get_crm_snapshot()
-                fin = get_financial_snapshot()
+            if text_lower.startswith("metrics"):
+                period = "overall" if "overall" in text_lower else "FY"
+                _, _, fy_label = get_fy_start()
+                period_header = f"Current FY ({fy_label})" if period == "FY" else "Lifetime / Overall"
+                
+                print(f"DEBUG: Generating Executive Dashboard ({period}) for Admin: {from_number}")
+                crm = get_crm_snapshot(period=period)
+                fin = get_financial_snapshot(period=period)
                 
                 msg = (
                     f"📊 *MEGA MOVE - EXECUTIVE DASHBOARD*\n"
-                    f"Target Period: Current Month\n\n"
+                    f"Target Period: {period_header}\n\n"
                     f"📈 *Sales Pipeline:*\n"
                     f"• Total Inquiries Received: {crm['inquiries']}\n"
                     f"• Shipments Booked (Won): {crm['booked']}\n"
                     f"• Sales Conversion Rate: {crm['conversion']:.1f}%\n\n"
                     f"💼 *Financial Health:*\n"
-                    f"• Total Invoice Revenue: {fin['revenue']:.2f}\n"
-                    f"• Total Operational Costs: {fin['costs']:.2f}\n"
-                    f"• Projected Net Margin: *{fin['profit']:.2f}*\n\n"
+                    f"• Total Invoice Revenue: USD {fin['revenue']:,.2f}\n"
+                    f"• Total Operational Costs: USD {fin['costs']:,.2f}\n"
+                    f"• Projected Net Margin: *{fin['profit']:,.2f}*\n\n"
                     f"🛠️ *Operations:*\n"
                     f"• Pending Carrier Bookings: Check Zoho Tasks"
                 )

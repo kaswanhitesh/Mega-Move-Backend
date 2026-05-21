@@ -790,10 +790,13 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
 
         # Extract text/data from file
         if filename.endswith(".xlsx") or filename.endswith(".xls"):
-            df = pd.read_excel(io.BytesIO(file_content), sheet_name=None)
+            all_sheets = pd.read_excel(io.BytesIO(file_content), sheet_name=None)
             raw_data = ""
-            for sheet, data in df.items():
-                raw_data += f"--- Tab: {sheet} ---\n{data.to_string()}\n"
+            for sheet_name, df in all_sheets.items():
+                # Clean empty data to save tokens
+                df = df.dropna(how='all').dropna(axis=1, how='all')
+                raw_data += f"\n--- DATA FROM SHEET: {sheet_name} ---\n"
+                raw_data += df.to_csv(index=False) + "\n"
         else:
             pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
             raw_data = "".join([page.extract_text() for page in pdf_reader.pages])
@@ -810,7 +813,9 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         # 2. CONTINUING AS VENDOR_RATE_SHEET
         # UNIVERSAL PARSING PROMPT - CALIBRATED FOR COMPLEX LOGISTICS EDGE CASES
         system_prompt = (
-            "You are an expert freight forwarder AI. Output strictly valid JSON with EXACTLY these keys: "
+            "You are an expert freight rate parser. I am providing you with a complete Excel workbook converted to CSV format, "
+            "separated by sheet names. Extract EVERY SINGLE freight rate across ALL sheets. Do not miss any rows. "
+            "Output strictly valid JSON with EXACTLY these keys: "
             "'shipper', 'pol', 'pod', 'commodity', 'equipment_type', 'weight', 'validity_date', 'transit_time', 'route'. "
             "Do not alter these key names. If data is missing, return 'Unknown'. "
             "Standardize container types to '20ft' or '40ft' and handle row splitting for multi-column price sheets."
@@ -865,7 +870,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         }}
 
         ### RAW DATA:
-        {raw_data[:12000]}
+        {raw_data[:100000]}
         """
         
         if wa_id:

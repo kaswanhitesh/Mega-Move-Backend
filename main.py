@@ -17,6 +17,8 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # --- GLOBAL STATE ---
 PENDING_UPLOADS = {}
+PROCESSED_MESSAGE_IDS = set()
+LAST_CLEANUP = datetime.now()
 
 # --- MASTER CONFIGURATION ---
 PORT_ALIASES = {
@@ -530,23 +532,34 @@ def process_email_rfq(payload):
 def process_whatsapp_message(payload):
     """Handles incoming WhatsApp messages/files and triggers AI processing."""
     print(f"Incoming Webhook Payload: {json.dumps(payload)}")
+    
+    global LAST_CLEANUP, PROCESSED_MESSAGE_IDS
+    
     try:
-        # SAFETY CHECK FOR EMPTY PAYLOADS (Meta Delivery Receipts / Status Updates)
+        # 0. IDEMPOTENCY CHECK (Prevent double processing on retries)
         entries = payload.get("entry", [])
-        if not entries:
-            return
-            
+        if not entries: return
         changes = entries[0].get("changes", [])
-        if not changes:
-            return
-            
+        if not changes: return
         value = changes[0].get("value", {})
         messages = value.get("messages", [])
-        
-        if not messages:
-            return 
+        if not messages: return
 
         message = messages[0]
+        message_id = message.get("id")
+        
+        if message_id in PROCESSED_MESSAGE_IDS:
+            print(f"Skipping already processed message: {message_id}")
+            return
+        
+        PROCESSED_MESSAGE_IDS.add(message_id)
+
+        # 0.1 Periodic Cleanup of IDs (every 10 minutes)
+        if (datetime.now() - LAST_CLEANUP).total_seconds() > 600:
+            PROCESSED_MESSAGE_IDS.clear()
+            LAST_CLEANUP = datetime.now()
+            print("Cleared processed message IDs cache.")
+
         from_number = message.get("from")
         
         # 1. HANDLE FILES (Rate Sheets)

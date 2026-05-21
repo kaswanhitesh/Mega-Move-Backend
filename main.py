@@ -157,6 +157,9 @@ def push_to_zoho_crm(module, data_list):
         "duplicate_check_fields": ["Rate_Key"]
     }
     
+    if data_list:
+        print(f"DEBUG: Sending to Zoho module '{module}'. Record keys: {list(data_list[0].keys())}")
+        
     response = requests.post(url, json=payload, headers=headers)
     
     if response.status_code not in [200, 201, 202]:
@@ -294,7 +297,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         ACT AS AN EXPERT LOGISTICS DATA ENGINEER. 
         Your task is to convert messy vendor rate sheets into structured JSON.
         
-        VENDOR NAME: {vendor_name}
+        VENDOR NAME: PIL (INDIA) PVT. LTD
         FILE NAME: {filename}
 
         ### CORE EXTRACTION RULES:
@@ -303,29 +306,28 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
            - Look for POL in: Tab Names, Section Headers (e.g., "RATES FROM MUNDRA"), or the first column.
            - If a POL is found at the top of a table/section, apply it to EVERY row in that section until a new POL is explicitly mentioned.
         
-        2. **PRICE SCRUBBING:** 
-           - Extract ONLY the base Ocean Freight as 'ocean_freight'. 
+        2. **PRICE SCRUBBING & ROW SPLITTING:** 
+           - For every row in the rate table, you must create TWO separate rate entries:
+             - Entry 1: Container Type = '20ft', Price = [Value from the first price column].
+             - Entry 2: Container Type = '40ft', Price = [Value from the second price column].
+           - Extract ONLY the numeric base Ocean Freight as 'ocean_freight'. 
            - Ignore surcharges, THC, documentation fees, or any text following symbols like "+", "&", "/", or "AND".
            - Example: "$1200 + THC" -> 1200.
-           - Example: "USD 500 & 200" -> 500.
            - Example: "Included" or "0" -> 0.0.
-           - If a cell contains "20/40" rates (e.g., "500/800"), split them into two separate JSON objects.
 
         3. **CONTAINER TYPE MAPPING:**
-           - Standardize types: "20ft Standard", "40ft Standard", "40ft High Cube".
-           - Recognize variants: "20DV", "20GP", "40HC", "40HQ", "HC", "HQ".
-           - Reliably extract the equipment type (e.g., 20DC, 40HC, 40ft Standard) as 'container_type'.
+           - Standardize types strictly to '20ft' or '40ft' based on the column headers.
 
         4. **COMMODITY & HAZ:**
            - If the row/column indicates "HAZ", "Hazardous", or "DG", append "(HAZ)" to the container_type.
 
-        5. **TRANSIT TIME & ROUTE:**
-           - TRANSIT TIME: Scan for columns or text labeled "T/T", "Transit", "TT", or "Days". Extract as 'transit_time' (e.g., "15 Days").
-           - ROUTE: Scan for "Routing", "Via", "POD Route", or "Transshipment". Extract as 'route' (e.g., "via Singapore", "Direct").
+        5. **TRANSIT TIME & ROUTE (COLUMN ALIASES):**
+           - 'VIA' -> Use this for the 'route' column (e.g., "Direct", "via Singapore").
+           - 'Days' -> Use this for the 'transit_time' column (e.g., "15 Days").
+           - 'Valid till' -> Use this for the 'validity_date' column.
 
         6. **VALIDITY SCAN:**
-           - Scan the document for "Valid until", "Expiry", "Valid till", or dates near the header/footer.
-           - Return it as 'validity_date' in YYYY-MM-DD format. If not found, return null.
+           - Return 'validity_date' in YYYY-MM-DD format. If not found, return null.
 
         ### OUTPUT FORMAT:
         Return ONLY a JSON object with a "rates" key:
@@ -334,7 +336,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
             {{
               "pol": "Origin Port",
               "pod": "Destination Port",
-              "container_type": "Standardized Type",
+              "container_type": "20ft or 40ft",
               "ocean_freight": 0.0,
               "transit_time": "Estimated Days",
               "route": "Routing Details",
@@ -365,7 +367,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         # Log to Zoho CRM (Pricings module)
         zoho_data = []
         for rate in extracted_rates:
-            carrier_name = vendor_name  # Using vendor_name as carrier
+            carrier_name = "PIL (INDIA) PVT. LTD"
             norm_pol = normalize_port_name(rate.get("pol"))
             norm_pod = normalize_port_name(rate.get("pod"))
             container_type = rate.get("container_type", "")

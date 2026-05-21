@@ -145,9 +145,16 @@ def get_zoho_access_token():
 
 def push_to_zoho_crm(module, data_list):
     access_token = get_zoho_access_token()
-    url = f"https://www.zohoapis.in/crm/v3/{module}" 
+    # Using the Upsert API to prevent duplicates
+    url = f"https://www.zohoapis.in/crm/v3/{module}/upsert" 
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}", "Content-Type": "application/json"}
-    response = requests.post(url, json={"data": data_list}, headers=headers)
+    
+    payload = {
+        "data": data_list,
+        "duplicate_check_fields": ["Rate_Key"]
+    }
+    
+    response = requests.post(url, json=payload, headers=headers)
     
     if response.status_code not in [200, 201, 202]:
         raise Exception(f"Zoho API Global Error ({response.status_code}): {response.text}")
@@ -362,6 +369,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
                 "Name": f"{carrier_name} - {norm_pol} to {norm_pod}",
                 "POL": norm_pol,
                 "POD": norm_pod,
+                "Rate_Key": f"{carrier_name}_{norm_pol}_{norm_pod}_{rate.get('container_type')}".upper().replace(" ", "_"),
                 "Validity_Date": rate.get("validity_date"),
                 "Transit_Time": rate.get("transit_time"),
                 "Route": rate.get("route"),

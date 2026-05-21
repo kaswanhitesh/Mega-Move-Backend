@@ -294,7 +294,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
            - If a POL is found at the top of a table/section, apply it to EVERY row in that section until a new POL is explicitly mentioned.
         
         2. **PRICE SCRUBBING:** 
-           - Extract ONLY the base Ocean Freight. 
+           - Extract ONLY the base Ocean Freight as 'ocean_freight'. 
            - Ignore surcharges, THC, documentation fees, or any text following symbols like "+", "&", "/", or "AND".
            - Example: "$1200 + THC" -> 1200.
            - Example: "USD 500 & 200" -> 500.
@@ -308,7 +308,11 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         4. **COMMODITY & HAZ:**
            - If the row/column indicates "HAZ", "Hazardous", or "DG", append "(HAZ)" to the container_type.
 
-        5. **VALIDITY SCAN:**
+        5. **TRANSIT TIME & ROUTE:**
+           - Extract 'transit_time' (e.g., "15 Days", "20-22 Days").
+           - Extract 'route' or transshipment info (e.g., "Direct", "via Singapore").
+
+        6. **VALIDITY SCAN:**
            - Scan the document for "Valid until", "Expiry", "Valid till", or dates near the header/footer.
            - Return it as 'validity_date' in YYYY-MM-DD format. If not found, return null.
 
@@ -321,6 +325,8 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
               "pod": "Destination Port",
               "container_type": "Standardized Type",
               "ocean_freight": 0.0,
+              "transit_time": "Estimated Days",
+              "route": "Routing Details",
               "validity_date": "YYYY-MM-DD or null"
             }}
           ]
@@ -348,7 +354,6 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         # Log to Zoho CRM (Pricings module)
         zoho_data = []
         for rate in extracted_rates:
-            price_val = rate.get("ocean_freight", 0.0)
             carrier_name = vendor_name  # Using vendor_name as carrier
             norm_pol = normalize_port_name(rate.get("pol"))
             norm_pod = normalize_port_name(rate.get("pod"))
@@ -358,10 +363,12 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
                 "POL": norm_pol,
                 "POD": norm_pod,
                 "Validity_Date": rate.get("validity_date"),
+                "Transit_Time": rate.get("transit_time"),
+                "Route": rate.get("route"),
                 "Subform_3": [
                     {
                         "Vendor_Name": carrier_name,
-                        "Ex_Work_Charges": str(price_val)
+                        "Freight_Air_Sea": str(rate.get("ocean_freight", 0.0))
                     }
                 ],
                 "Subform_2": [

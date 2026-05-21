@@ -1418,7 +1418,19 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
             images = IMAGE_BUFFER.pop(from_number, [])
             raw_text = await extract_raw_content(images[0], filename, "image")
         
-        # 2. COGNITIVE CLASSIFICATION
+        # --- PERMANENT CONVERSATIONAL DEFAULT SAFETY CATCHERS ---
+        # If there is a pending action waiting for your confirmation, intercept it immediately
+        if from_number in PENDING_TASKS:
+            print(f"DEBUG: Active task pending for {from_number}. Routing directly to confirmation handler.")
+            handle_confirmation(raw_text, from_number)
+            return
+
+        # If you type a filler word out of nowhere, stop the bot from running its AI parser on it
+        if msg_type == "text" and raw_text.lower() in ["no", "yes", "cancel", "stop", "ok", "thanks", "thank you", "n", "y"]:
+            send_whatsapp_message(from_number, "🛑 No active actions pending to confirm or cancel. Type *help* to see available commands.")
+            return
+
+        # 2. COGNITIVE CLASSIFICATION (Only runs if you didn't say Yes/No/Cancel above)
         classification = await classify_operational_intent(raw_text if msg_type == "text" else "", caption, raw_text)
         category = classification.get('category')
         target = classification.get('action_target')

@@ -325,14 +325,15 @@ def get_fy_start():
 def get_crm_snapshot(period="FY"):
     """Calculates CRM metrics: inquiries, bookings, and conversion rate."""
     access_token = get_zoho_access_token()
-    books_start, crm_start, fy_label = get_fy_start()
+    books_start_str, _, fy_label = get_fy_start()
+    fy_start_date = datetime.strptime(books_start_str, "%Y-%m-%d")
     
-    # Fetch deals - if FY, we iterate and break on older records for reliability
-    url = "https://www.zohoapis.in/crm/v3/Deals?sort_by=Created_Time&sort_order=desc"
+    # Explicitly request required fields to prevent omission by Zoho default view
+    url = "https://www.zohoapis.in/crm/v3/Deals?fields=Created_Time,Stage,Deal_Name&sort_by=Created_Time&sort_order=desc&per_page=100"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     
-    inquiries = 0
-    booked = 0
+    total_inquiries = 0
+    booked_shipments = 0
     
     page = 1
     more_records = True
@@ -341,16 +342,34 @@ def get_crm_snapshot(period="FY"):
         res = requests.get(f"{url}&page={page}", headers=headers)
         if res.status_code == 200 and res.json().get("data"):
             deals = res.json()["data"]
-            for d in deals:
-                created_time = d.get("Created_Time")
-                if period == "FY" and created_time < crm_start:
-                    more_records = False
-                    break
-                
-                inquiries += 1
-                if d.get("Stage") == "Closed Won":
-                    booked += 1
+            print(f"DEBUG: Fetched {len(deals)} deals from CRM (Page {page}).")
             
+            for deal in deals:
+                try:
+                    created_str = deal.get("Created_Time")
+                    if not created_str:
+                        print(f"DEBUG: Deal {deal.get('id')} is missing Created_Time")
+                        continue
+                        
+                    # Safely extract just the YYYY-MM-DD part to avoid timezone crashing
+                    clean_date_str = created_str.split("T")[0]
+                    deal_date = datetime.strptime(clean_date_str, "%Y-%m-%d")
+                    
+                    if period == "FY" and deal_date < fy_start_date:
+                        more_records = False
+                        break # We've hit the previous FY, stop counting
+                        
+                    total_inquiries += 1
+                    if deal.get("Stage") == "Closed Won":
+                        booked_shipments += 1
+                        
+                except Exception as e:
+                    print(f"DEBUG: Error parsing deal date: {e}")
+                    continue
+            
+            if not more_records:
+                break
+                
             info = res.json().get("info", {})
             if not info.get("more_records"):
                 more_records = False
@@ -358,8 +377,8 @@ def get_crm_snapshot(period="FY"):
         else:
             more_records = False
 
-    conversion = (booked / inquiries * 100) if inquiries > 0 else 0.0
-    return {"inquiries": inquiries, "booked": booked, "conversion": conversion}
+    conversion_rate = (booked_shipments / total_inquiries * 100) if total_inquiries > 0 else 0.0
+    return {"inquiries": total_inquiries, "booked": booked_shipments, "conversion": conversion_rate}
 
 def get_financial_snapshot(period="FY"):
     """Aggregates revenue and costs from Zoho Books for a specific period."""

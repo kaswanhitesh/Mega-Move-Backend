@@ -263,9 +263,12 @@ def generate_quotation_pdf(inq_number, pol, pod, equipment, sell_price):
         return f.read()
 
 # --- RATE SHEET PROCESSING ---
-def process_rate_sheet(file_content, filename, vendor_name):
+def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
     """Parses Excel/PDF rate sheets using a calibrated GPT-4o prompt."""
     try:
+        if wa_id:
+            send_whatsapp_message(wa_id, "📥 *Received your rate sheet.* Reading the document...")
+
         # Extract text/data from file
         if filename.endswith(".xlsx") or filename.endswith(".xls"):
             df = pd.read_excel(io.BytesIO(file_content), sheet_name=None)
@@ -327,6 +330,9 @@ def process_rate_sheet(file_content, filename, vendor_name):
         {raw_data[:12000]}
         """
         
+        if wa_id:
+            send_whatsapp_message(wa_id, "🧠 *Analyzing rates...* Extracting POL, POD, and pricing. (This might take a few seconds)")
+
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "system", "content": "You are a specialized logistics data parser. Output ONLY valid JSON."},
@@ -336,6 +342,9 @@ def process_rate_sheet(file_content, filename, vendor_name):
         
         extracted_rates = json.loads(response.choices[0].message.content).get("rates", [])
         
+        if wa_id:
+            send_whatsapp_message(wa_id, f"✅ *Successfully extracted {len(extracted_rates)} rates.* Pushing to Zoho CRM in batches...")
+
         # Log to Zoho CRM (Pricings module)
         zoho_data = []
         for rate in extracted_rates:
@@ -374,11 +383,15 @@ def process_rate_sheet(file_content, filename, vendor_name):
                 return f"Successfully processed {len(zoho_data)} rates for {vendor_name}."
             except Exception as zoho_err:
                 print(f"CRITICAL ERROR: {str(zoho_err)}")
+                if wa_id:
+                    send_whatsapp_message(wa_id, f"❌ *Error:* Zoho API Failure - {str(zoho_err)}")
                 return f"⚠️ Zoho CRM Error: {str(zoho_err)}"
         return "No rates could be extracted."
 
     except Exception as e:
         print(f"CRITICAL ERROR: {str(e)}")
+        if wa_id:
+            send_whatsapp_message(wa_id, f"❌ *Error:* {str(e)}")
         return f"Error processing rate sheet: {e}"
 
 # --- EMAIL PROCESSING LOGIC ---
@@ -496,7 +509,7 @@ def process_whatsapp_message(payload):
             file_bytes = requests.get(media_url, headers={"Authorization": f"Bearer {access_token}"}).content
             
             vendor_name = filename.split(" ")[0] if " " in filename else "WhatsApp Vendor"
-            status = process_rate_sheet(file_bytes, filename, vendor_name)
+            status = process_rate_sheet(file_bytes, filename, vendor_name, from_number)
             send_whatsapp_message(from_number, status)
 
         # 2. HANDLE TEXT (Greetings or Inquiries)

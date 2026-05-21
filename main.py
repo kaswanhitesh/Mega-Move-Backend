@@ -246,13 +246,25 @@ def process_rate_sheet(file_content, filename, vendor_name):
         # Log to Zoho CRM (CustomModule1 for Rates)
         zoho_data = []
         for rate in extracted_rates:
+            price_val = rate.get("ocean_freight", 0.0)
+            carrier_name = vendor_name  # Using vendor_name as carrier
+            
             zoho_data.append({
-                "Vendor_Name": vendor_name,
+                "Name": f"{carrier_name} - {rate.get('pol')} to {rate.get('pod')}",
                 "POL": rate.get("pol"),
                 "POD": rate.get("pod"),
-                "Vehicle_Types": rate.get("container_type"),
-                "Exwork_Charges": rate.get("ocean_freight"),
-                "Validity": rate.get("validity")
+                "Subform_3": [
+                    {
+                        "Vendor_Name": carrier_name,
+                        "Ex_Work_Charges": price_val
+                    }
+                ],
+                "Subform_2": [
+                    {
+                        "Vendor_Name": carrier_name,
+                        "Vehicle_Types": rate.get("container_type")
+                    }
+                ]
             })
         
         if zoho_data:

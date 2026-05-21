@@ -16,7 +16,7 @@ app = FastAPI(title="Mega Move AI Backend")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # --- GLOBAL STATE ---
-PENDING_UPLOADS = {}
+PENDING_TASKS = {}
 PROCESSED_MESSAGE_IDS = set()
 LAST_CLEANUP = datetime.now()
 
@@ -426,14 +426,19 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         
         if zoho_data:
             # SAVE TO MEMORY FOR HUMAN-IN-THE-LOOP CONFIRMATION
-            PENDING_UPLOADS[wa_id] = zoho_data
-            
             unique_vendors = ", ".join(list(set([r.get("Name").split(" - ")[0] for r in zoho_data])))
+            
+            PENDING_TASKS[wa_id] = {
+                'action': 'upload_rates',
+                'description': f"upload {len(zoho_data)} rates from {unique_vendors}",
+                'data': zoho_data
+            }
+            
             summary = (
                 f"📊 *Extraction Complete!*\n\n"
                 f"Found {len(zoho_data)} total rates.\n"
                 f"Vendors: {unique_vendors}\n\n"
-                f"Reply *YES* to confirm and upload to Zoho, or *NO* to cancel."
+                f"I am about to upload these rates to Zoho CRM. Please reply *YES* to confirm, or *NO* to cancel."
             )
             if wa_id:
                 send_whatsapp_message(wa_id, summary)
@@ -448,38 +453,46 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         return f"Error processing rate sheet: {e}"
 
 def handle_confirmation(text, sender_wa_id):
-    """Processes YES/NO confirmation for pending rate uploads."""
+    """Processes YES/NO confirmation for pending tasks (uploads or enquiries)."""
     user_text = str(text).strip().upper()
-    
-    if user_text == "YES":
-        zoho_rates = PENDING_UPLOADS.get(sender_wa_id)
-        if not zoho_rates:
-            send_whatsapp_message(sender_wa_id, "⚠️ No pending upload found.")
-            return
+    task = PENDING_TASKS.get(sender_wa_id)
 
-        send_whatsapp_message(sender_wa_id, "🚀 *Confirmed.* Pushing to Zoho CRM via Upsert...")
+    if not task:
+        send_whatsapp_message(sender_wa_id, "⚠️ No pending action found.")
+        return
+
+    if user_text == "YES":
+        action = task.get('action')
+        data = task.get('data')
+
+        if action == 'upload_rates':
+            send_whatsapp_message(sender_wa_id, "🚀 *Confirmed.* Pushing to Zoho CRM via Upsert...")
+            try:
+                batch_size = 50
+                for i in range(0, len(data), batch_size):
+                    batch = data[i : i + batch_size]
+                    push_to_zoho_crm("Pricings", batch)
+                send_whatsapp_message(sender_wa_id, f"✅ *Success!* {len(data)} rates uploaded to Zoho CRM.")
+            except Exception as e:
+                print(f"CRITICAL ERROR: {str(e)}")
+                send_whatsapp_message(sender_wa_id, f"❌ *Error during upload:* {str(e)}")
         
-        try:
-            # Batch uploads in chunks of 50
-            batch_size = 50
-            for i in range(0, len(zoho_rates), batch_size):
-                batch = zoho_rates[i : i + batch_size]
-                push_to_zoho_crm("Pricings", batch)
-            
-            send_whatsapp_message(sender_wa_id, f"✅ *Success!* {len(zoho_rates)} rates uploaded to Zoho CRM.")
-            del PENDING_UPLOADS[sender_wa_id]
-        except Exception as e:
-            print(f"CRITICAL ERROR: {str(e)}")
-            send_whatsapp_message(sender_wa_id, f"❌ *Error during upload:* {str(e)}")
+        elif action == 'log_enquiry':
+            send_whatsapp_message(sender_wa_id, "🚀 *Confirmed.* Logging your enquiry in Zoho CRM...")
+            try:
+                push_to_zoho_crm("Deals", [data])
+                send_whatsapp_message(sender_wa_id, "✅ *Success!* Your enquiry has been logged. Our team will contact you shortly.")
+            except Exception as e:
+                print(f"CRITICAL ERROR: {str(e)}")
+                send_whatsapp_message(sender_wa_id, f"❌ *Error logging enquiry:* {str(e)}")
+
+        del PENDING_TASKS[sender_wa_id]
             
     elif user_text == "NO":
-        if sender_wa_id in PENDING_UPLOADS:
-            del PENDING_UPLOADS[sender_wa_id]
-            send_whatsapp_message(sender_wa_id, "🛑 *Upload cancelled.* Data cleared from memory.")
-        else:
-            send_whatsapp_message(sender_wa_id, "⚠️ No pending upload to cancel.")
+        del PENDING_TASKS[sender_wa_id]
+        send_whatsapp_message(sender_wa_id, "🛑 *Action cancelled.*")
     else:
-        send_whatsapp_message(sender_wa_id, "🤔 I didn't understand that. Please reply *YES* to upload or *NO* to cancel.")
+        send_whatsapp_message(sender_wa_id, f"🤔 I am still waiting for your confirmation to {task.get('description')}. Please reply *YES* to proceed or *NO* to cancel.")
 
 # --- EMAIL PROCESSING LOGIC ---
 def process_email_rfq(payload):
@@ -614,8 +627,8 @@ def process_whatsapp_message(payload):
         elif message.get("type") == "text":
             text = message.get("text", {}).get("body", "").lower()
             
-            # CHECK FOR PENDING UPLOADS (Human-in-the-Loop)
-            if from_number in PENDING_UPLOADS:
+            # CHECK FOR PENDING TASKS (Human-in-the-Loop)
+            if from_number in PENDING_TASKS:
                 handle_confirmation(text, from_number)
                 return
 
@@ -631,14 +644,21 @@ def process_whatsapp_message(payload):
             else:
                 pol, pod = extracted.get('pol'), extracted.get('pod')
                 if pol and pod:
-                    # Log the enquiry since no rate was found
+                    # PROMPT FOR CONFIRMATION instead of logging immediately
                     inq_number = generate_next_inquiry_number()
-                    push_to_zoho_crm("Deals", [{
+                    enquiry_data = {
                         "Deal_Name": inq_number,
                         "Stage": "Qualification",
                         "Description": f"Source: WhatsApp\nRoute: {pol} to {pod}\nCommodity: {extracted.get('commodity')}"
-                    }])
-                    send_whatsapp_message(from_number, "I could not find a rate for that route. I have logged this as an enquiry, and our team will contact you shortly.")
+                    }
+                    
+                    PENDING_TASKS[from_number] = {
+                        'action': 'log_enquiry',
+                        'description': f"log an enquiry for {pol} to {pod}",
+                        'data': enquiry_data
+                    }
+                    
+                    send_whatsapp_message(from_number, f"🔍 I couldn't find an instant rate for {pol} to {pod}. \n\nI am about to log this as an enquiry in Zoho CRM. Please reply *YES* to confirm, or *NO* to cancel.")
                 else:
                     send_whatsapp_message(from_number, "👋 Hello! I am the Mega Move AI. Send me a rate sheet or an inquiry to get started.")
 

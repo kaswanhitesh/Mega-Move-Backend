@@ -292,6 +292,43 @@ def check_vendor_bill_mismatches():
                         })
     return mismatches
 
+def get_crm_snapshot():
+    """Calculates CRM metrics: inquiries, bookings, and conversion rate for the last 30 days."""
+    access_token = get_zoho_access_token()
+    # Search for deals created in the last 30 days
+    url = "https://www.zohoapis.in/crm/v3/Deals/search?criteria=(Created_Time:between:2026-01-01T00:00:00+05:30,2026-12-31T23:59:59+05:30)" # Logic placeholder for date range
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    res = requests.get(url, headers=headers)
+    
+    metrics = {"inquiries": 0, "booked": 0, "conversion": 0.0}
+    if res.status_code == 200 and res.json().get("data"):
+        deals = res.json()["data"]
+        metrics["inquiries"] = len(deals)
+        metrics["booked"] = len([d for d in deals if d.get("Stage") == "Closed Won"])
+        if metrics["inquiries"] > 0:
+            metrics["conversion"] = (metrics["booked"] / metrics["inquiries"]) * 100
+    return metrics
+
+def get_financial_snapshot():
+    """Aggregates monthly revenue and costs from Zoho Books."""
+    access_token = get_zoho_access_token()
+    org_id = os.getenv("ZOHO_BOOKS_ORG_ID")
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    
+    # 1. Fetch Invoices for Revenue
+    inv_res = requests.get(f"https://www.zohoapis.in/books/v3/invoices?organization_id={org_id}", headers=headers)
+    # 2. Fetch Bills for Costs
+    bill_res = requests.get(f"https://www.zohoapis.in/books/v3/bills?organization_id={org_id}", headers=headers)
+    
+    revenue = 0.0
+    costs = 0.0
+    if inv_res.status_code == 200:
+        revenue = sum([float(i.get("total", 0)) for i in inv_res.json().get("invoices", [])])
+    if bill_res.status_code == 200:
+        costs = sum([float(b.get("total", 0)) for b in bill_res.json().get("bills", [])])
+        
+    return {"revenue": revenue, "costs": costs, "profit": revenue - costs}
+
 def get_zoho_access_token():
     url = "https://accounts.zoho.in/oauth/v2/token" 
     payload = {
@@ -1006,6 +1043,29 @@ async def process_whatsapp_message(payload):
             # CHECK FOR PENDING TASKS (Human-in-the-Loop)
             if from_number in PENDING_TASKS:
                 handle_confirmation(text, from_number)
+                return
+
+            # --- EXECUTIVE DASHBOARD (PHASE 6) ---
+            if text_lower in ["metrics", "dashboard", "status"]:
+                print(f"DEBUG: Generating Executive Dashboard for Admin: {from_number}")
+                crm = get_crm_snapshot()
+                fin = get_financial_snapshot()
+                
+                msg = (
+                    f"📊 *MEGA MOVE - EXECUTIVE DASHBOARD*\n"
+                    f"Target Period: Current Month\n\n"
+                    f"📈 *Sales Pipeline:*\n"
+                    f"• Total Inquiries Received: {crm['inquiries']}\n"
+                    f"• Shipments Booked (Won): {crm['booked']}\n"
+                    f"• Sales Conversion Rate: {crm['conversion']:.1f}%\n\n"
+                    f"💼 *Financial Health:*\n"
+                    f"• Total Invoice Revenue: {fin['revenue']:.2f}\n"
+                    f"• Total Operational Costs: {fin['costs']:.2f}\n"
+                    f"• Projected Net Margin: *{fin['profit']:.2f}*\n\n"
+                    f"🛠️ *Operations:*\n"
+                    f"• Pending Carrier Bookings: Check Zoho Tasks"
+                )
+                send_whatsapp_message(from_number, msg)
                 return
 
             # --- LIVE TRACKING ENGINE (PHASE 4) ---

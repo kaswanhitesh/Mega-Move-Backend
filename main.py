@@ -314,13 +314,14 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         3. **CONTAINER TYPE MAPPING:**
            - Standardize types: "20ft Standard", "40ft Standard", "40ft High Cube".
            - Recognize variants: "20DV", "20GP", "40HC", "40HQ", "HC", "HQ".
+           - Reliably extract the equipment type (e.g., 20DC, 40HC, 40ft Standard) as 'container_type'.
 
         4. **COMMODITY & HAZ:**
            - If the row/column indicates "HAZ", "Hazardous", or "DG", append "(HAZ)" to the container_type.
 
         5. **TRANSIT TIME & ROUTE:**
-           - Extract 'transit_time' (e.g., "15 Days", "20-22 Days").
-           - Extract 'route' or transshipment info (e.g., "Direct", "via Singapore").
+           - TRANSIT TIME: Scan for columns or text labeled "T/T", "Transit", "TT", or "Days". Extract as 'transit_time' (e.g., "15 Days").
+           - ROUTE: Scan for "Routing", "Via", "POD Route", or "Transshipment". Extract as 'route' (e.g., "via Singapore", "Direct").
 
         6. **VALIDITY SCAN:**
            - Scan the document for "Valid until", "Expiry", "Valid till", or dates near the header/footer.
@@ -367,16 +368,19 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
             carrier_name = vendor_name  # Using vendor_name as carrier
             norm_pol = normalize_port_name(rate.get("pol"))
             norm_pod = normalize_port_name(rate.get("pod"))
+            container_type = rate.get("container_type", "")
+            transit_time = rate.get("transit_time", "")
+            route = rate.get("route", "")
             
             zoho_data.append({
-                "Name": f"{carrier_name} - {norm_pol} to {norm_pod} - {rate.get('container_type')}",
+                "Name": f"{carrier_name} - {norm_pol} to {norm_pod} - {container_type}",
                 "POL": norm_pol,
                 "POD": norm_pod,
-                "Container_Type": rate.get("container_type"),
-                "Rate_Key": f"{carrier_name}_{norm_pol}_{norm_pod}_{rate.get('container_type')}".upper().replace(" ", "_"),
+                "Container_Type": container_type,
+                "Rate_Key": f"{carrier_name}_{norm_pol}_{norm_pod}_{container_type}".upper().replace(" ", "_"),
                 "Validity_Date": rate.get("validity_date"),
-                "Transit_Time": rate.get("transit_time"),
-                "Route": rate.get("route"),
+                "Transit_Time": transit_time,
+                "Route": route,
                 "Subform_3": [
                     {
                         "Vendor_Name": carrier_name,

@@ -252,6 +252,30 @@ def search_lowest_rate(pol, pod):
             return min(valid_rates, key=lambda x: x['price'])
     return None
 
+def process_inquiry(text):
+    """Analyzes text to find a rate. Returns (reply_text, extracted_details)."""
+    prompt = f"Extract freight details from this WhatsApp message. Return JSON: pol, pod, commodity. JSON only.\n\nMessage: {text}"
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "system", "content": "You are a specialized logistics parser. Output ONLY valid JSON."},
+                  {"role": "user", "content": prompt}],
+        response_format={ "type": "json_object" }
+    )
+    extracted = json.loads(response.choices[0].message.content)
+    pol, pod = extracted.get('pol'), extracted.get('pod')
+    
+    if pol and pod:
+        best_rate = search_lowest_rate(pol, pod)
+        if best_rate:
+            margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
+            sell_price = best_rate['price'] * (1 + (margin_pct / 100))
+            validity_info = f"⏳ Valid until: {best_rate.get('validity_date', 'Unknown')}"
+            inq_number = generate_next_inquiry_number()
+            reply = f"✅ Rate Found for {pol} ➡️ {pod}\n\nPrice: USD {sell_price:.2f}\nEquipment: {best_rate['vehicle']}\nInquiry: {inq_number}\n{validity_info}"
+            return reply, extracted
+            
+    return None, extracted
+
 def generate_quotation_pdf(inq_number, pol, pod, equipment, sell_price):
     pdf = FPDF()
     pdf.add_page()
@@ -595,34 +619,28 @@ def process_whatsapp_message(payload):
                 handle_confirmation(text, from_number)
                 return
 
+            # 1. Quote First logic
+            reply, extracted = process_inquiry(text)
+            if reply:
+                send_whatsapp_message(from_number, reply)
+                return
+                
+            # 2. Fallback to Greetings or Enquiry Logging
             if text in ["hi", "hello", "hey"]:
                 send_whatsapp_message(from_number, "👋 Hello! I am the Mega Move AI. Send me a rate sheet or an inquiry to get started.")
             else:
-                prompt = f"Extract freight details from this WhatsApp message. Return JSON: pol, pod, commodity. JSON only.\n\nMessage: {text}"
-                response = client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[{"role": "system", "content": "You are a logistics parser. Output only valid JSON."},{"role": "user", "content": prompt}],
-                    response_format={ "type": "json_object" }
-                )
-                extracted = json.loads(response.choices[0].message.content)
                 pol, pod = extracted.get('pol'), extracted.get('pod')
-                
                 if pol and pod:
+                    # Log the enquiry since no rate was found
                     inq_number = generate_next_inquiry_number()
                     push_to_zoho_crm("Deals", [{
                         "Deal_Name": inq_number,
                         "Stage": "Qualification",
-                        "Description": f"Source: WhatsApp\nRoute: {pol} to {pod}"
+                        "Description": f"Source: WhatsApp\nRoute: {pol} to {pod}\nCommodity: {extracted.get('commodity')}"
                     }])
-                    best_rate = search_lowest_rate(pol, pod)
-                    if best_rate:
-                        margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
-                        sell_price = best_rate['price'] * (1 + (margin_pct / 100))
-                        validity_info = f"⏳ Valid until: {best_rate.get('validity_date', 'Unknown')}"
-                        msg = f"✅ Rate Found for {pol} ➡️ {pod}\n\nPrice: USD {sell_price:.2f}\nEquipment: {best_rate['vehicle']}\nInquiry: {inq_number}\n{validity_info}"
-                        send_whatsapp_message(from_number, msg)
-                    else:
-                        send_whatsapp_message(from_number, f"⚠️ I've logged your inquiry {inq_number}, but I couldn't find an instant rate for {pol} to {pod}.")
+                    send_whatsapp_message(from_number, "I could not find a rate for that route. I have logged this as an enquiry, and our team will contact you shortly.")
+                else:
+                    send_whatsapp_message(from_number, "👋 Hello! I am the Mega Move AI. Send me a rate sheet or an inquiry to get started.")
 
     except Exception as e:
         print(f"CRITICAL ERROR: {str(e)}")

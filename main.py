@@ -370,19 +370,20 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
             carrier_name = "PIL (INDIA) PVT. LTD"
             norm_pol = normalize_port_name(rate.get("pol"))
             norm_pod = normalize_port_name(rate.get("pod"))
-            container_type = rate.get("container_type", "")
-            transit_time = rate.get("transit_time", "")
-            route = rate.get("route", "")
+            
+            # Standardize container type and keys for mapping
+            c_type = rate.get("container_type", "")
+            r_key = f"{carrier_name}_{norm_pol}_{norm_pod}_{c_type}".upper().replace(" ", "_")
             
             zoho_data.append({
-                "Name": f"{carrier_name} - {norm_pol} to {norm_pod} - {container_type}",
+                "Name": f"{carrier_name} - {norm_pol} to {norm_pod} - {c_type}",
                 "POL": norm_pol,
                 "POD": norm_pod,
-                "Container_Type": container_type,
-                "Rate_Key": f"{carrier_name}_{norm_pol}_{norm_pod}_{container_type}".upper().replace(" ", "_"),
+                "Container_Type": str(c_type),
+                "Transit_Time": str(rate.get("transit_time", "")),
+                "Route": str(rate.get("route", "")),
+                "Rate_Key": str(r_key),
                 "Validity_Date": rate.get("validity_date"),
-                "Transit_Time": transit_time,
-                "Route": route,
                 "Subform_3": [
                     {
                         "Vendor_Name": carrier_name,

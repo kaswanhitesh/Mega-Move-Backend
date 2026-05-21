@@ -16,6 +16,10 @@ import asyncio
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 
 # --- GLOBAL STATE ---
 PENDING_TASKS = {}
@@ -212,6 +216,32 @@ def send_whatsapp_message(to_number, text):
     payload = {"messaging_product": "whatsapp", "to": to_number, "type": "text", "text": {"body": text}}
     requests.post(url, headers=headers, json=payload)
 
+def send_email_with_attachment(to_email, subject, body, pdf_bytes=None, filename=None):
+    """Sends an email using Zoho SMTP (or similar) with an optional attachment."""
+    sender_email = os.getenv("ZOHO_EMAIL_ADDRESS")
+    sender_password = os.getenv("ZOHO_EMAIL_PASSWORD")
+    
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = to_email
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
+    
+    if pdf_bytes:
+        part = MIMEApplication(pdf_bytes, Name=filename)
+        part['Content-Disposition'] = f'attachment; filename="{filename}"'
+        msg.attach(part)
+        
+    try:
+        # Use Zoho SMTP settings (smtp.zoho.in for India orgs)
+        with smtplib.SMTP_SSL('smtp.zoho.in', 465) as server:
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"SMTP Error: {e}")
+        return False
+
 def upload_and_send_pdf(to_number, file_bytes, filename, caption):
     phone_id = os.getenv("WHATSAPP_PHONE_ID")
     access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
@@ -403,6 +433,16 @@ def get_financial_snapshot(period="FY"):
         
     return {"revenue": float(revenue), "costs": float(costs), "profit": float(revenue - costs)}
 
+def get_deal_by_id(inq_number):
+    """Fetches a full Deal record from Zoho CRM by its INQ number."""
+    access_token = get_zoho_access_token()
+    url = f"https://www.zohoapis.in/crm/v3/Deals/search?criteria=(Deal_Name:equals:{inq_number})"
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    res = requests.get(url, headers=headers)
+    if res.status_code == 200 and res.json().get("data"):
+        return res.json()["data"][0]
+    return None
+
 def get_zoho_access_token():
     url = "https://accounts.zoho.in/oauth/v2/token" 
     payload = {
@@ -548,8 +588,10 @@ def search_rates(pol, pod):
                             "vendor": vendor_name,
                             "price": float(price_val),
                             "vehicle": r.get("Container_Type") or "N/A",
-                            "transit_time": r.get("Transit_Time") or "N/A",
-                            "route": r.get("Route") or "N/A",
+                            "transit_time": r.get("Transit_Time") or "Standard Routing",
+                            "free_time": r.get("Free_Time") or "As per tariff",
+                            "local_charges": r.get("Local_Charges") or "At actuals",
+                            "route": r.get("Route") or "Direct",
                             "validity_date": validity_str or "N/A",
                             "pol": r.get("POL") or normalized_pol,
                             "pod": r.get("POD") or normalized_pod
@@ -722,8 +764,15 @@ def generate_quotation_pdf(inq_number, pol, pod, equipment, sell_price):
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(200, 10, txt=f"Total Sell Price: USD {sell_price:.2f}", ln=1, align='L')
     pdf.ln(20)
-    pdf.set_font("Arial", 'I', 10)
-    pdf.cell(200, 10, txt="* Rates are subject to space and equipment availability.", ln=1, align='L')
+    pdf.set_font("Arial", 'B', 10)
+    pdf.cell(200, 10, txt="Terms & Conditions:", ln=1, align='L')
+    pdf.set_font("Arial", 'I', 8)
+    pdf.multi_cell(200, 5, txt=(
+        "1. Rates are subject to space and equipment availability.\n"
+        "2. Destination local charges and THC are as per actuals.\n"
+        "3. Quote validity: 7 days unless specified otherwise.\n"
+        "4. Subject to standard trading conditions of Mega Move India Pvt Ltd."
+    ))
     file_path = "/tmp/quotation.pdf"
     pdf.output(file_path)
     with open(file_path, "rb") as f:
@@ -932,80 +981,68 @@ def handle_confirmation(text, sender_wa_id):
 
 # --- EMAIL PROCESSING LOGIC ---
 def process_email_rfq(payload):
-    """Parses incoming emails and creates Zoho CRM Deals with Contact mapping."""
+    """Parses incoming emails and initiates the HITL workflow."""
     try:
         email_body = payload.get("body", "")
         sender_email = payload.get("sender", "Client")
         subject = payload.get("subject", "No Subject")
         
-        prompt = f"""
-        Analyze this freight request email.
-        Extract the following and return strictly valid JSON:
-        - pol: Port of Loading
-        - pod: Port of Discharge
-        - container_type: Equipment requested
-        - commodity: If mentioned
-        - company: The company requesting the quote
-        - contact_email: The email of the requester (use {sender_email} if not found in body)
-        
-        Subject: {subject}
-        Body: {email_body}
-        """
+        # 1. AI Parsing
+        system_prompt = (
+            "You are an expert freight forwarder AI. Output strictly valid JSON with EXACTLY these keys: "
+            "'pol', 'pod', 'equipment_type', 'commodity'. Do not alter these key names. "
+            "If data is missing, return 'Unknown'."
+        )
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "system", "content": "You are a precise logistics parser. Output only valid JSON."},{"role": "user", "content": prompt}],
+            messages=[{"role": "system", "content": system_prompt},
+                      {"role": "user", "content": f"Subject: {subject}\nBody: {email_body}"}],
             response_format={ "type": "json_object" }
         )
         extracted = json.loads(response.choices[0].message.content)
-        
-        pol = extracted.get('pol')
-        pod = extracted.get('pod')
-        company_name = extracted.get('company') or "Unknown Company"
-        contact_email = extracted.get('contact_email') or sender_email
-        
-        if pol and pod:
-            access_token = get_zoho_access_token()
-            headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+        pol = extracted.get('pol', 'Unknown')
+        pod = extracted.get('pod', 'Unknown')
+        equipment = extracted.get('equipment_type', 'Unknown')
+
+        # 2. Auto-Acknowledgement Email
+        ack_body = (
+            "Hello,\n\n"
+            "Thank you for your inquiry regarding the shipment from {} to {}.\n"
+            "Our team is currently calculating the best possible route and rates for your {} shipment.\n"
+            "We will get back to you with an official quotation shortly.\n\n"
+            "Best Regards,\n"
+            "Mega Move Logistics Team".format(pol, pod, equipment)
+        )
+        send_email_with_attachment(sender_email, "Re: {}".format(subject), ack_body)
+
+        # 3. Zoho CRM Deal Creation
+        inq_number = generate_next_inquiry_number()
+        deal_data = {
+            "Deal_Name": inq_number,
+            "Stage": "Qualification",
+            # Save sender email in Description for later retrieval
+            "Description": "Sender Email: {}\nRoute: {} to {}\nCommodity: {}\nEquipment: {}".format(
+                sender_email, pol, pod, extracted.get('commodity', 'Unknown'), equipment
+            )
+        }
+        push_to_zoho_crm("Deals", [deal_data])
+
+        # 4. Notify Admin via WhatsApp
+        admin_number = os.getenv("YOUR_WHATSAPP_NUMBER")
+        if admin_number:
+            msg = (
+                "📧 *New Email Inquiry*\n"
+                "From: {}\n"
+                "Route: {} ➡️ {}\n"
+                "Ref: {}\n\n"
+                "Reply *APPROVE {}* to accept this inquiry and search for rates.".format(
+                    sender_email, pol, pod, inq_number, inq_number
+                )
+            )
+            send_whatsapp_message(admin_number, msg)
             
-            # Advanced Contact Mapping
-            contact_id = None
-            search_res = requests.get(f"https://www.zohoapis.in/crm/v3/Contacts/search?email={contact_email}", headers=headers)
-            if search_res.status_code == 200 and search_res.json().get("data"):
-                contact_id = search_res.json()["data"][0]["id"]
-            
-            inq_number = generate_next_inquiry_number()
-            deal_data = {
-                "Deal_Name": inq_number,
-                "Stage": "Qualification",
-                "Description": f"Route: {pol} to {pod}\nCommodity: {extracted.get('commodity')}\nContainer: {extracted.get('container_type')}\nReceived From: {contact_email}"
-            }
-            if contact_id:
-                deal_data["Contact_Name"] = {"id": contact_id}
-            
-            push_to_zoho_crm("Deals", [deal_data])
-            
-            alert_msg = f"📧 *New Email RFQ Processed*\n\nID: {inq_number}\nFrom: {contact_email}\nRoute: {pol} ➡️ {pod}\n\nI have logged this in Zoho CRM."
-            
-            best_rate = search_lowest_rate(pol, pod)
-            if best_rate:
-                margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
-                sell_price = best_rate['price'] * (1 + (margin_pct / 100))
-                pdf_bytes = generate_quotation_pdf(inq_number, pol, pod, best_rate['vehicle'], sell_price)
-                
-                validity_info = f"⏳ Valid until: {best_rate.get('validity_date', 'Unknown')}"
-                alert_msg += f"\n\n✅ I also found a rate and generated a quotation.\n{validity_info}"
-                
-                my_number = os.getenv("YOUR_WHATSAPP_NUMBER") 
-                if my_number:
-                    upload_and_send_pdf(my_number, pdf_bytes, f"{inq_number}.pdf", alert_msg)
-            else:
-                alert_msg += f"\n\n⚠️ No valid rates found for this route."
-                my_number = os.getenv("YOUR_WHATSAPP_NUMBER")
-                if my_number:
-                    send_whatsapp_message(my_number, alert_msg)
-                    
     except Exception as e:
-        print(f"Email Processing Error: {e}")
+        print("Email Processing Error: {}".format(e))
 
 # --- WHATSAPP MESSAGE PROCESSING ---
 async def process_whatsapp_message(payload):
@@ -1157,17 +1194,12 @@ async def process_whatsapp_message(payload):
             if text_lower.startswith("track"):
                 ref = text.split(" ", 1)[-1].strip()
                 tracking_id = ref
-                
-                # If reference is an Inquiry ID, lookup the container number in Zoho
                 if ref.upper().startswith("INQ"):
-                    print(f"DEBUG: Tracking by Inquiry ID: {ref}")
                     container_no = get_deal_tracking_details(ref.upper())
-                    if container_no:
-                        tracking_id = container_no
+                    if container_no: tracking_id = container_no
                     else:
                         send_whatsapp_message(from_number, f"⚠️ I couldn't find a container number for inquiry {ref} in Zoho CRM.")
                         return
-
                 status_data = fetch_container_status(tracking_id)
                 msg = (
                     f"🚢 *Live Tracking Update*\n"
@@ -1178,6 +1210,87 @@ async def process_whatsapp_message(payload):
                     f"🗓️ ETA: {status_data['eta']}"
                 )
                 send_whatsapp_message(from_number, msg)
+                return
+
+            # --- HITL EMAIL WORKFLOW (PHASE 7) ---
+            if text_lower.startswith("approve "):
+                inq_number = text.split(" ", 1)[-1].strip().upper()
+                deal = get_deal_by_id(inq_number)
+                if not deal:
+                    send_whatsapp_message(from_number, f"⚠️ Inquiry {inq_number} not found.")
+                    return
+                desc = deal.get("Description", "")
+                # Extract POL/POD from description (legacy/email format)
+                pol, pod = "Unknown", "Unknown"
+                if "Route: " in desc:
+                    route_line = [l for l in desc.split("\n") if "Route: " in l][0]
+                    pol, pod = route_line.replace("Route: ", "").split(" to ")
+                
+                rates = search_rates(pol, pod)
+                if not rates:
+                    send_whatsapp_message(from_number, f"⚠️ No rates found for {pol} to {pod} ({inq_number}).")
+                    return
+                
+                best = rates[0]
+                msg = (
+                    f"📊 *Rates Found for {inq_number}*\n"
+                    f"Route: {pol} ➡️ {pod}\n"
+                    f"Vendor: {best['vendor']}\n"
+                    f"Base O/F: {best['price']}\n"
+                    f"Transit: {best['transit_time']}\n"
+                    f"Free Time: {best['free_time']}\n\n"
+                    f"Reply *QUOTE {inq_number}* to draft the PDF."
+                )
+                send_whatsapp_message(from_number, msg)
+                return
+
+            if text_lower.startswith("quote "):
+                inq_number = text.split(" ", 1)[-1].strip().upper()
+                deal = get_deal_by_id(inq_number)
+                if not deal: return
+                desc = deal.get("Description", "")
+                pol, pod = "Unknown", "Unknown"
+                if "Route: " in desc:
+                    route_line = [l for l in desc.split("\n") if "Route: " in l][0]
+                    pol, pod = route_line.replace("Route: ", "").split(" to ")
+                rates = search_rates(pol, pod)
+                if not rates: return
+                best = rates[0]
+                margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
+                sell_price = best['price'] * (1 + (margin_pct / 100))
+                pdf_bytes = generate_quotation_pdf(inq_number, pol, pod, best['vehicle'], sell_price)
+                caption = f"📄 *Draft Quote Ready* for {inq_number}. Reply *SEND {inq_number}* to email client."
+                upload_and_send_pdf(from_number, pdf_bytes, f"{inq_number}.pdf", caption)
+                return
+
+            if text_lower.startswith("send "):
+                inq_number = text.split(" ", 1)[-1].strip().upper()
+                deal = get_deal_by_id(inq_number)
+                if not deal: return
+                desc = deal.get("Description", "")
+                client_email = "Unknown"
+                if "Sender Email: " in desc:
+                    client_email = desc.split("Sender Email: ")[1].split("\n")[0].strip()
+                if client_email == "Unknown":
+                    send_whatsapp_message(from_number, f"⚠️ No email found for {inq_number}.")
+                    return
+                pol, pod = "Unknown", "Unknown"
+                if "Route: " in desc:
+                    route_line = [l for l in desc.split("\n") if "Route: " in l][0]
+                    pol, pod = route_line.replace("Route: ", "").split(" to ")
+                rates = search_rates(pol, pod)
+                best = rates[0]
+                margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
+                sell_price = best['price'] * (1 + (margin_pct / 100))
+                pdf_bytes = generate_quotation_pdf(inq_number, pol, pod, best['vehicle'], sell_price)
+                subject = "Freight Quotation - {}".format(inq_number)
+                body = "Dear Client,\n\nPlease find attached your official freight quotation (Ref: {}).\n\nBest Regards,\nMega Move India".format(inq_number)
+                if send_email_with_attachment(client_email, subject, body, pdf_bytes, f"{inq_number}.pdf"):
+                    update_data = {"id": deal.get("id"), "Stage": "Proposal/Price Quote"}
+                    push_to_zoho_crm("Deals", [update_data])
+                    send_whatsapp_message(from_number, f"✅ *Success.* Quotation for {inq_number} emailed to {client_email}.")
+                else:
+                    send_whatsapp_message(from_number, "❌ *Error.* Failed to send email.")
                 return
 
             # 1. AI Extraction (Standard Inquiries)

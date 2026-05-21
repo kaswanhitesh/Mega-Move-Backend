@@ -196,73 +196,72 @@ def generate_next_inquiry_number():
     next_num = last_num + 1
     return f"INQ-MMI-2026-{str(next_num).zfill(3)}"
 
-def search_lowest_rate(pol, pod):
+def search_rates(pol, pod):
     normalized_pol = normalize_port_name(pol)
     normalized_pod = normalize_port_name(pod)
     
     print(f"DEBUG: Searching Zoho for POL={normalized_pol}, POD={normalized_pod}")
     
     access_token = get_zoho_access_token()
-    # Using starts_with for more flexible matching (API allows minor naming variations)
-    url = f"https://www.zohoapis.in/crm/v3/Pricings/search?criteria=(((POL:starts_with:{normalized_pol})and(POD:starts_with:{normalized_pod})))"
+    # STEP 1: Search ONLY for IDs (Subforms are not returned by default search)
+    url = f"https://www.zohoapis.in/crm/v3/Pricings/search?criteria=(((POL:starts_with:{normalized_pol})and(POD:starts_with:{normalized_pod})))&fields=id"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     res = requests.get(url, headers=headers)
     
+    valid_rates = []
     if res.status_code == 200 and res.json().get("data"):
-        rates = res.json()["data"]
-        valid_rates = []
+        record_ids = [r.get("id") for r in res.json()["data"]]
         today = datetime.now().date()
         
-        for r in rates:
-            print(f"DEBUG: Retrieved record: {r}")
-            sub3 = r.get("Subform_3", [])
-            print(f"DEBUG: Subform_3 contents: {sub3}")
+        for record_id in record_ids:
+            # STEP 2: Fetch FULL record by ID to guarantee subform data
+            get_url = f"https://www.zohoapis.in/crm/v3/Pricings/{record_id}"
+            get_res = requests.get(get_url, headers=headers)
             
-            try:
-                # 1. EXPIRED RATE FILTERING
-                validity_str = r.get("Validity_Date")
-                if validity_str:
-                    try:
-                        validity_date = datetime.strptime(validity_str, "%Y-%m-%d").date()
-                        if validity_date < today:
-                            continue # Skip expired rates
-                    except:
-                        pass 
+            if get_res.status_code == 200 and get_res.json().get("data"):
+                r = get_res.json()["data"][0]
+                print(f"DEBUG: Retrieved full record: {record_id}")
                 
-                # 2. DATA EXTRACTION (Iterating Subform_3 for Freight_Air_Sea)
-                if not sub3:
-                    print("DEBUG: Subform_3 is empty, skipping record.")
-                    continue
-                
-                for entry in sub3:
-                    price_val = entry.get("Freight_Air_Sea")
-                    vendor_name = entry.get("Vendor_Name") or "N/A"
+                try:
+                    # 1. EXPIRED RATE FILTERING
+                    validity_str = r.get("Validity_Date")
+                    if validity_str:
+                        try:
+                            validity_date = datetime.strptime(validity_str, "%Y-%m-%d").date()
+                            if validity_date < today:
+                                continue 
+                        except:
+                            pass 
                     
-                    # Skip if price is missing or zero
-                    if not price_val or str(price_val).strip() == "" or float(price_val) == 0:
-                        print(f"DEBUG: Skipping subform entry due to invalid price: {price_val}")
+                    # 2. DATA EXTRACTION
+                    sub3 = r.get("Subform_3", [])
+                    if not sub3:
                         continue
                     
-                    valid_rates.append({
-                        "vendor": vendor_name,
-                        "price": float(price_val),
-                        "vehicle": r.get("Container_Type") or "N/A",
-                        "transit_time": r.get("Transit_Time") or "N/A",
-                        "route": r.get("Route") or "N/A",
-                        "validity_date": validity_str or "N/A",
-                        "pol": r.get("POL") or normalized_pol,
-                        "pod": r.get("POD") or normalized_pod
-                    })
-            except Exception as inner_e:
-                print(f"DEBUG: Error processing individual record: {str(inner_e)}")
-                pass
-                
-        if valid_rates:
-            return min(valid_rates, key=lambda x: x['price'])
-    return None
+                    for entry in sub3:
+                        price_val = entry.get("Freight_Air_Sea")
+                        vendor_name = entry.get("Vendor_Name") or "N/A"
+                        
+                        if not price_val or str(price_val).strip() == "" or float(price_val) == 0:
+                            continue
+                        
+                        valid_rates.append({
+                            "vendor": vendor_name,
+                            "price": float(price_val),
+                            "vehicle": r.get("Container_Type") or "N/A",
+                            "transit_time": r.get("Transit_Time") or "N/A",
+                            "route": r.get("Route") or "N/A",
+                            "validity_date": validity_str or "N/A",
+                            "pol": r.get("POL") or normalized_pol,
+                            "pod": r.get("POD") or normalized_pod
+                        })
+                except Exception as inner_e:
+                    print(f"DEBUG: Error processing record {record_id}: {str(inner_e)}")
+                    
+    return valid_rates
 
 def process_inquiry(text):
-    """Analyzes text to find a rate. Returns (reply_text, extracted_details)."""
+    """Analyzes text to find rates. Returns (reply_text, extracted_details)."""
     prompt = f"Extract freight details from this WhatsApp message. Return JSON: pol, pod, commodity. JSON only.\n\nMessage: {text}"
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -274,21 +273,34 @@ def process_inquiry(text):
     pol, pod = extracted.get('pol'), extracted.get('pod')
     
     if pol and pod:
-        best_rate = search_lowest_rate(pol, pod)
-        if best_rate:
+        rates = search_rates(pol, pod)
+        if rates:
             margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
-            sell_price = best_rate['price'] * (1 + (margin_pct / 100))
             inq_number = generate_next_inquiry_number()
             
-            # Professional Structured Quotation
+            # Group by vehicle type and pick lowest price for each
+            best_rates_by_type = {}
+            for r in rates:
+                v_type = r['vehicle']
+                if v_type not in best_rates_by_type or r['price'] < best_rates_by_type[v_type]['price']:
+                    best_rates_by_type[v_type] = r
+            
+            # Construct multi-equipment response
+            rates_text = ""
+            for v_type, rate in best_rates_by_type.items():
+                sell_price = rate['price'] * (1 + (margin_pct / 100))
+                rates_text += (
+                    f"📦 *Equipment:* {v_type}\n"
+                    f"💰 *Ocean Freight:* USD {sell_price:.2f}\n"
+                    f"⏱️ *Transit Time:* {rate['transit_time']}\n"
+                    f"🗺️ *Routing:* {rate['route']}\n"
+                    f"⏳ *Valid until:* {rate['validity_date']}\n\n"
+                )
+            
             reply = (
-                f"🚢 *Quotation: {best_rate['pol']} ➡️ {best_rate['pod']}*\n\n"
-                f"📦 *Equipment:* {best_rate['vehicle']}\n"
-                f"🏢 *Vendor:* {best_rate['vendor']}\n"
-                f"💰 *Ocean Freight:* USD {sell_price:.2f}\n"
-                f"⏱️ *Transit Time:* {best_rate['transit_time']}\n"
-                f"🗺️ *Routing:* {best_rate['route']}\n"
-                f"⏳ *Valid until:* {best_rate['validity_date']}\n\n"
+                f"🚢 *Quotation: {rates[0]['pol']} ➡️ {rates[0]['pod']}*\n\n"
+                f"{rates_text}"
+                f"🏢 *Vendor:* {rates[0]['vendor']}\n"
                 f"Ref: {inq_number}"
             )
             return reply, extracted

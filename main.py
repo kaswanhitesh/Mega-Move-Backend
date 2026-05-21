@@ -446,6 +446,26 @@ def get_deal_by_id(inq_number):
         return res.json()["data"][0]
     return None
 
+def get_primary_vendor_email(vendor_name, pol=None):
+    """Searches Zoho CRM for the primary PIC email for a vendor."""
+    access_token = get_zoho_access_token()
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    
+    # 1. Search in Vendors module
+    url = f"https://www.zohoapis.in/crm/v3/Vendors/search?criteria=(Vendor_Name:equals:{vendor_name})"
+    res = requests.get(url, headers=headers)
+    if res.status_code == 200 and res.json().get("data"):
+        return res.json()["data"][0].get("Email")
+    
+    # 2. Fallback to Contacts search
+    url = f"https://www.zohoapis.in/crm/v3/Contacts/search?criteria=(Account_Name:equals:{vendor_name})"
+    res = requests.get(url, headers=headers)
+    if res.status_code == 200 and res.json().get("data"):
+        for contact in res.json()["data"]:
+            if contact.get("Email"): return contact.get("Email")
+                
+    return None
+
 def get_zoho_access_token():
     url = "https://accounts.zoho.in/oauth/v2/token" 
     payload = {
@@ -885,18 +905,35 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         
         extracted_rates = json.loads(response.choices[0].message.content).get("rates", [])
         
+        # 3. PYTHON DEDUPLICATION (Lowest price wins)
+        dedup_map = {}
+        for rate in extracted_rates:
+            carrier = rate.get('shipper', 'PIL (INDIA) PVT. LTD')
+            pol = rate.get('pol', 'Unknown')
+            pod = rate.get('pod', 'Unknown')
+            eq_type = rate.get('equipment_type', 'Unknown')
+            price = float(rate.get('ocean_freight', 0.0))
+            
+            if price <= 0: continue
+            
+            key = (carrier, pol, pod, eq_type)
+            if key not in dedup_map or price < dedup_map[key]['ocean_freight']:
+                dedup_map[key] = rate
+
         if wa_id:
-            send_whatsapp_message(wa_id, f"✅ *Successfully extracted {len(extracted_rates)} rates.* Pushing to Zoho CRM in batches...")
+            send_whatsapp_message(wa_id, f"✅ *Extracted {len(extracted_rates)} rates.* Deduplicated to {len(dedup_map)} best prices. Mapping PICs...")
 
         # Log to Zoho CRM (Pricings module)
         zoho_data = []
-        for rate in extracted_rates:
-            carrier_name = "PIL (INDIA) PVT. LTD"
-            norm_pol = normalize_port_name(rate.get("pol", "Unknown"))
-            norm_pod = normalize_port_name(rate.get("pod", "Unknown"))
+        for key, rate in dedup_map.items():
+            carrier_name, pol_raw, pod_raw, eq_type = key
+            norm_pol = normalize_port_name(pol_raw)
+            norm_pod = normalize_port_name(pod_raw)
             
-            # Standardize equipment type and keys for mapping
-            eq_type = rate.get("equipment_type", "Unknown")
+            # Map Primary PIC Email
+            mapped_email = get_primary_vendor_email(carrier_name, norm_pol)
+            
+            # Standardize keys for mapping
             r_key = f"{carrier_name}_{norm_pol}_{norm_pod}_{eq_type}".upper().replace(" ", "_")
             
             zoho_data.append({
@@ -908,6 +945,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
                 "Route": str(rate.get("route", "Unknown")),
                 "Rate_Key": str(r_key),
                 "Validity_Date": rate.get("validity_date", "Unknown"),
+                "Vendor_Email": mapped_email or "Unknown",
                 "Subform_3": [
                     {
                         "Vendor_Name": carrier_name,
@@ -1306,6 +1344,30 @@ async def process_whatsapp_message(payload):
                     send_whatsapp_message(from_number, f"✅ *Success.* Quotation for {inq_number} emailed to {client_email}.")
                 else:
                     send_whatsapp_message(from_number, "❌ *Error.* Failed to send email.")
+                return
+
+            if text_lower.startswith("book "):
+                inq_number = text.split(" ", 1)[-1].strip().upper()
+                deal = get_deal_by_id(inq_number)
+                if not deal: return
+                
+                # Fetch vendor from the Deal (assume Vendor_Name field exists)
+                vendor_name = deal.get("Vendor_Name", "Unknown")
+                pol = deal.get("POL", "Unknown")
+                
+                vendor_email = get_primary_vendor_email(vendor_name, pol)
+                if not vendor_email:
+                    send_whatsapp_message(from_number, f"⚠️ No primary PIC email found for {vendor_name}.")
+                    return
+                
+                subject = f"Booking Request - {inq_number}"
+                body = f"Dear {vendor_name} Team,\n\nPlease process the booking for {inq_number}.\n\nBest Regards,\nMega Move India"
+                
+                # Ensure to_addrs ONLY receives the single primary email (plus CC)
+                if send_email_with_attachment(vendor_email, subject, body):
+                    send_whatsapp_message(from_number, f"✅ *Booking Sent.* Request for {inq_number} sent to primary PIC: {vendor_email}")
+                else:
+                    send_whatsapp_message(from_number, f"❌ *Error.* Failed to send booking to {vendor_email}.")
                 return
 
             # 1. AI Extraction (Standard Inquiries)

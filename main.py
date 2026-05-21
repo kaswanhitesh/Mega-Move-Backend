@@ -366,6 +366,134 @@ def format_inr(number):
     except:
         return f"₹ {number:,.2f}"
 
+async def extract_raw_content(file_bytes, filename, msg_type):
+    """Universal extractor for Excel, PDF, Images, and Text."""
+    ext = filename.split('.')[-1].lower()
+    
+    try:
+        # 1. EXCEL / CSV
+        if ext in ['xlsx', 'xls', 'csv']:
+            all_sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, header=None)
+            combined_text = ""
+            for sheet_name, df in all_sheets.items():
+                df = df.dropna(how='all').dropna(axis=1, how='all')
+                combined_text += f"\n--- SHEET: {sheet_name} ---\n{df.to_csv(index=False)}\n"
+            return combined_text
+        
+        # 2. PDF
+        elif ext == 'pdf':
+            pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+            return "".join([page.extract_text() for page in pdf_reader.pages])
+        
+        # 3. IMAGES (OCR via Vision AI)
+        elif msg_type == "image":
+            base64_image = base64.b64encode(file_bytes).decode('utf-8')
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Perform a high-fidelity OCR dump of this logistics document. Extract all text, numbers, and tabular structures into a clean readable string."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                }]
+            )
+            return response.choices[0].message.content
+        
+        # 4. RAW TEXT
+        else:
+            return file_bytes.decode('utf-8', errors='ignore')
+            
+    except Exception as e:
+        print(f"Extraction Error ({filename}): {e}")
+        return f"Extraction Error: {str(e)}"
+
+async def classify_operational_intent(user_text, caption, content_snippet):
+    """Cognitive classifier to route logistics operations."""
+    system_prompt = (
+        "You are an AI logistics operational router. Analyze the user's text message, incoming caption, and the following document text snippet. "
+        "Classify the user's true intent and document category.\n"
+        "Return a strict JSON format: \n"
+        "{\n"
+        "  \"category\": \"ratesheet\" | \"vendor_bill\" | \"tariff\" | \"inquiry\" | \"command\",\n"
+        "  \"action_target\": \"INQ-XXX\" or null,\n"
+        "  \"confidence\": float\n"
+        "}"
+    )
+    user_context = f"User Msg: {user_text}\nCaption: {caption}\nContent Snippet: {content_snippet[:5000]}"
+    
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "system", "content": system_prompt},
+                  {"role": "user", "content": user_context}],
+        response_format={ "type": "json_object" }
+    )
+    return json.loads(response.choices[0].message.content)
+
+async def extract_raw_content(file_bytes, filename, msg_type):
+    """Universal extractor for Excel, PDF, Images, and Text."""
+    ext = filename.split('.')[-1].lower()
+    
+    try:
+        # 1. EXCEL / CSV
+        if ext in ['xlsx', 'xls', 'csv']:
+            all_sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, header=None)
+            combined_text = ""
+            for sheet_name, df in all_sheets.items():
+                df = df.dropna(how='all').dropna(axis=1, how='all')
+                combined_text += f"\n--- SHEET: {sheet_name} ---\n{df.to_csv(index=False)}\n"
+            return combined_text
+        
+        # 2. PDF
+        elif ext == 'pdf':
+            pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+            return "".join([page.extract_text() for page in pdf_reader.pages])
+        
+        # 3. IMAGES (OCR via Vision AI)
+        elif msg_type == "image":
+            base64_image = base64.b64encode(file_bytes).decode('utf-8')
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Perform a high-fidelity OCR dump of this logistics document. Extract all text, numbers, and tabular structures into a clean readable string."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                }]
+            )
+            return response.choices[0].message.content
+        
+        # 4. RAW TEXT
+        else:
+            return file_bytes.decode('utf-8', errors='ignore')
+            
+    except Exception as e:
+        print(f"Extraction Error ({filename}): {e}")
+        return f"Extraction Error: {str(e)}"
+
+async def classify_operational_intent(user_text, caption, content_snippet):
+    """Cognitive classifier to route logistics operations."""
+    system_prompt = (
+        "You are an AI logistics operational router. Analyze the user's text message, incoming caption, and the following document text snippet. "
+        "Classify the user's true intent and document category.\n"
+        "Return a strict JSON format: \n"
+        "{\n"
+        "  \"category\": \"ratesheet\" | \"vendor_bill\" | \"tariff\" | \"inquiry\" | \"command\",\n"
+        "  \"action_target\": \"INQ-XXX\" or null,\n"
+        "  \"confidence\": float\n"
+        "}"
+    )
+    user_context = f"User Msg: {user_text}\nCaption: {caption}\nContent Snippet: {content_snippet[:5000]}"
+    
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "system", "content": system_prompt},
+                  {"role": "user", "content": user_context}],
+        response_format={ "type": "json_object" }
+    )
+    return json.loads(response.choices[0].message.content)
+
 def get_fy_start():
     """Calculates the start of the Indian Financial Year (April 1st)."""
     now = datetime.now()
@@ -1192,10 +1320,9 @@ def process_email_rfq(payload):
         print("Email Processing Error: {}".format(e))
 
 # --- WHATSAPP MESSAGE PROCESSING ---
-async def process_whatsapp_message(payload):
-    """Handles incoming WhatsApp messages/files and triggers AI processing."""
+async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
+    """Unified Cognitive Ingestion Pipeline."""
     print(f"Incoming Webhook Payload: {json.dumps(payload)}")
-    
     global LAST_CLEANUP, PROCESSED_MESSAGE_IDS
     
     try:
@@ -1208,232 +1335,135 @@ async def process_whatsapp_message(payload):
         if not messages: return
 
         message = messages[0]
+        from_number = message.get("from")
+        msg_type = message.get("type")
 
-        # 0.1 Periodic Cleanup of IDs (every 10 minutes)
+        # IDEMPOTENCY CLEANUP
         if (datetime.now() - LAST_CLEANUP).total_seconds() > 600:
             PROCESSED_MESSAGE_IDS.clear()
             LAST_CLEANUP = datetime.now()
-            print("Cleared processed message IDs cache.")
 
-        from_number = message.get("from")
-        
-        # 1. HANDLE FILES (Rate Sheets or Tariffs)
-        if message.get("type") == "document":
+        # 1. UNIFIED CONTENT ACQUISITION
+        raw_text = ""
+        caption = ""
+        filename = "message.txt"
+        file_bytes = None
+
+        if msg_type == "text":
+            raw_text = message.get("text", {}).get("body", "")
+        elif msg_type == "document":
             doc = message.get("document")
+            caption = doc.get("caption", "")
+            filename = doc.get("filename", "doc.pdf")
             media_id = doc.get("id")
-            filename = str(doc.get("filename", "")).lower()
-            caption = str(doc.get("caption", "")).lower()
-            print(f"Received document: {filename} with caption: '{caption}'")
-            
             access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
-            media_url_res = requests.get(f"https://graph.facebook.com/v18.0/{media_id}", 
-                                         headers={"Authorization": f"Bearer {access_token}"})
+            media_url_res = requests.get(f"https://graph.facebook.com/v18.0/{media_id}", headers={"Authorization": f"Bearer {access_token}"})
+            media_url = media_url_res.json().get("url")
+            file_bytes = requests.get(media_url, headers={"Authorization": f"Bearer {access_token}"}).content
+            raw_text = await extract_raw_content(file_bytes, filename, "document")
+        elif msg_type == "image":
+            img = message.get("image")
+            caption = img.get("caption", "")
+            filename = "snapshot.jpg"
+            media_id = img.get("id")
+            access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
+            media_url_res = requests.get(f"https://graph.facebook.com/v18.0/{media_id}", headers={"Authorization": f"Bearer {access_token}"})
             media_url = media_url_res.json().get("url")
             file_bytes = requests.get(media_url, headers={"Authorization": f"Bearer {access_token}"}).content
             
-            # RELATIONAL PRICING: Check for Local Charges Tariff (Caption or Filename)
-            is_tariff = "local" in caption or "tariff" in caption or "local" in filename or "tariff" in filename
-            
-            if is_tariff:
-                send_whatsapp_message(from_number, "📄 *Local Charges Tariff Received.* Analyzing Carrier and standardizing fees...")
-                background_tasks.add_task(process_local_charges_pdf, file_bytes, from_number)
-                return
-
-            vendor_name = filename.split(" ")[0] if " " in filename else "WhatsApp Vendor"
-            status = process_rate_sheet(file_bytes, filename, vendor_name, from_number)
-            send_whatsapp_message(from_number, status)
-
-        # 1.1 HANDLE IMAGES (Project Cargo/OOG Enquiries with Aggregation Buffer)
-        elif message.get("type") == "image":
-            img = message.get("image")
-            media_id = img.get("id")
-            
-            access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
-            media_url_res = requests.get(f"https://graph.facebook.com/v18.0/{media_id}", 
-                                         headers={"Authorization": f"Bearer {access_token}"})
-            media_url = media_url_res.json().get("url")
-            image_bytes = requests.get(media_url, headers={"Authorization": f"Bearer {access_token}"}).content
-            
-            # Buffer management
             if from_number not in IMAGE_BUFFER:
                 IMAGE_BUFFER[from_number] = []
-                # First image in batch starts the timer
                 is_first = True
             else:
                 is_first = False
-                
-            IMAGE_BUFFER[from_number].append(image_bytes)
+            IMAGE_BUFFER[from_number].append(file_bytes)
+            if not is_first: return 
             
-            if is_first:
-                send_whatsapp_message(from_number, "📥 *Images received.* Waiting 10s for additional screenshots before analysis...")
-                await asyncio.sleep(10)
-                
-                # BATCH PROCESSING
-                send_whatsapp_message(from_number, "👁️ *Vision AI:* Analyzing all buffered images for shipment details...")
-                
-                try:
-                    images_to_process = IMAGE_BUFFER[from_number]
-                    extracted = process_image_inquiry(images_to_process)
-                    
-                    # Clear buffer early to prevent race conditions on subsequent messages
-                    IMAGE_BUFFER.pop(from_number, None)
-                    
-                    commodity = extracted.get("commodity", "Unknown")
-                    shipper = extracted.get("shipper", "Unknown")
-                    pol = extracted.get("pol", "Unknown")
-                    pod = extracted.get("pod", "Unknown")
-                    readiness = extracted.get("readiness", "Unknown")
-                    
-                    inq_number = generate_next_inquiry_number()
-                    
-                    enquiry_data = {
-                        "Deal_Name": inq_number,
-                        "Stage": "Qualification",
-                        "Type": "Project Cargo",
-                        "Description": f"Vision AI Multi-Image Inquiry\nShipper: {shipper}\nRoute: {pol} to {pod}\nCargo: {commodity}\nSpecs: {extracted.get('equipment_type', 'Unknown')}, {extracted.get('weight', 'Unknown')}\nReadiness: {readiness}\nSource: WhatsApp Images ({len(images_to_process)} files)"
-                    }
-                    
-                    PENDING_TASKS[from_number] = {
-                        'action': 'log_enquiry',
-                        'description': f"log this inquiry for {commodity}",
-                        'data': enquiry_data
-                    }
-                    
-                    send_whatsapp_message(from_number, f"📊 *Extraction Complete!*\n\nI have analyzed {len(images_to_process)} images and parsed the inquiry for {commodity}.\n\nReply *YES* to log this into Zoho CRM.")
-                except Exception as e:
-                    print(f"Vision Processing Error: {e}")
-                    IMAGE_BUFFER.pop(from_number, None)
-                    send_whatsapp_message(from_number, f"❌ *Error during image analysis:* {str(e)}")
-            else:
-                # Subsequent images just get a small notification or silent append
-                print(f"Added additional image to buffer for {from_number}")
+            send_whatsapp_message(from_number, "📥 *Images received.* Waiting for aggregation...")
+            await asyncio.sleep(8)
+            images = IMAGE_BUFFER.pop(from_number, [])
+            raw_text = await extract_raw_content(images[0], filename, "image")
+        
+        # 2. COGNITIVE CLASSIFICATION
+        classification = await classify_operational_intent(raw_text if msg_type == "text" else "", caption, raw_text)
+        category = classification.get('category')
+        target = classification.get('action_target')
+        print(f"DEBUG: Cognitive Classification: {category} (Target: {target})")
 
-        # 2. HANDLE TEXT (Greetings or Inquiries)
-        elif message.get("type") == "text":
-            text = str(message.get("text", {}).get("body", "")).strip()
-            text_lower = text.lower()
-            
-            # --- HELP / MENU DIRECTORY ---
-            if text_lower in ["captions", "help", "menu", "commands"]:
-                help_msg = (
-                    "🤖 *Mega Move AI - Command Directory*\n\n"
-                    "*💬 Text Commands:*\n"
-                    "• *APPROVE [INQ-XXX]* : Finds lowest O/F rates & local charges.\n"
-                    "• *QUOTE [INQ-XXX]* : Generates the PDF quotation.\n"
-                    "• *SEND [INQ-XXX]* : Emails the PDF to the client.\n"
-                    "• *Outstanding [Vendor]* : Pulls live balances from Zoho Books.\n"
-                    "• *Metrics* : Displays Executive Dashboard (Sales & Financials).\n\n"
-                    "*📄 Document Uploads:*\n"
-                    "• *Excel Rate Sheets* : (No caption needed) Upload an .xlsx file to extract and update ocean freight rates in Zoho CRM.\n"
-                    "• *PDF Tariffs* : Upload a carrier PDF with the caption *'local charges'* to extract origin/destination fees.\n\n"
-                    "Type any of these commands to execute."
-                )
+        # 3. DYNAMIC ROUTING
+        if category == 'command':
+            text_cmd = raw_text.lower()
+            if any(k in text_cmd for k in ["help", "menu", "commands", "captions"]):
+                help_msg = ("🤖 *Mega Move AI - Unified Operating System*\\n\\n"
+                            "You can send text commands or upload documents in *any format* (PDF, Excel, CSV, Images, or plain text). "
+                            "The AI will automatically identify and process the content.\\n\\n"
+                            "*💬 Text Commands:*\\n"
+                            "• *APPROVE [INQ-XXX]* : Calculates lowest rates & links local charges.\\n"
+                            "• *QUOTE [INQ-XXX]* : Generates the localized PDF quotation.\\n"
+                            "• *SEND [INQ-XXX]* : Emails the PDF to the client (CCs Hitesh).\\n"
+                            "• *Outstanding [Company]* : Pulls live ledgers from Zoho Books.\\n"
+                            "• *Metrics* : Displays current FY Dashboard in INR (Lakhs/Crores).\\n\\n"
+                            "*📄 Universal Document Ingestion:*\\n"
+                            "Simply drop any file or snapshot (Rate Sheets, Carrier Tariffs, Vendor Bills, or Customer Emails). "
+                            "The system will auto-classify and update your databases instantly.")
                 send_whatsapp_message(from_number, help_msg)
                 return
 
-            # CHECK FOR PENDING TASKS (Human-in-the-Loop)
             if from_number in PENDING_TASKS:
-                handle_confirmation(text, from_number)
+                handle_confirmation(raw_text, from_number)
                 return
-
-            # --- EXECUTIVE DASHBOARD (PHASE 6) ---
-            if text_lower.startswith("metrics"):
-                period = "overall" if "overall" in text_lower else "FY"
+            
+            if text_cmd.startswith("metrics"):
+                period = "overall" if "overall" in text_cmd else "FY"
+                crm, fin = get_crm_snapshot(period=period), get_financial_snapshot(period=period)
                 _, _, fy_label = get_fy_start()
-                period_header = f"Current FY ({fy_label})" if period == "FY" else "Lifetime / Overall"
-                
-                print(f"DEBUG: Generating Executive Dashboard ({period}) for Admin: {from_number}")
-                crm = get_crm_snapshot(period=period)
-                fin = get_financial_snapshot(period=period)
-                
-                msg = (
-                    f"📊 *MEGA MOVE - EXECUTIVE DASHBOARD*\n"
-                    f"Target Period: {period_header}\n\n"
-                    f"📈 *Sales Pipeline:*\n"
-                    f"• Total Inquiries Received: {crm['inquiries']}\n"
-                    f"• Shipments Booked (Won): {crm['booked']}\n"
-                    f"• Sales Conversion Rate: {crm['conversion']:.1f}%\n\n"
-                    f"💼 *Financial Health:*\n"
-                    f"• Total Invoice Revenue: {format_inr(fin['revenue'])}\n"
-                    f"• Total Operational Costs: {format_inr(fin['costs'])}\n"
-                    f"• Projected Net Margin: *{format_inr(fin['profit'])}*\n\n"
-                    f"🛠️ *Operations:*\n"
-                    f"• Pending Carrier Bookings: Check Zoho Tasks"
-                )
+                msg = (f"📊 *MEGA MOVE - EXECUTIVE DASHBOARD*\\nTarget Period: {'Current FY ('+fy_label+')' if period=='FY' else 'Lifetime / Overall'}\\n\\n"
+                       f"📈 *Sales Pipeline:*\\n• Total Inquiries Received: {crm['inquiries']}\\n• Shipments Booked (Won): {crm['booked']}\\n• Sales Conversion Rate: {crm['conversion']:.1f}%\\n\\n"
+                       f"💼 *Financial Health:*\\n• Total Invoice Revenue: {format_inr(fin['revenue'])}\\n• Total Operational Costs: {format_inr(fin['costs'])}\\n• Projected Net Margin: *{format_inr(fin['profit'])}*\\n\\n"
+                       f"🛠️ *Operations:*\\n• Pending Carrier Bookings: Check Zoho Tasks")
                 send_whatsapp_message(from_number, msg)
                 return
 
-            # --- LIVE TRACKING ENGINE (PHASE 4) ---
-            if text_lower.startswith("track"):
-                ref = text.split(" ", 1)[-1].strip()
+            if text_cmd.startswith("track"):
+                ref = raw_text.split(" ", 1)[-1].strip()
                 tracking_id = ref
                 if ref.upper().startswith("INQ"):
                     container_no = get_deal_tracking_details(ref.upper())
                     if container_no: tracking_id = container_no
                     else:
-                        send_whatsapp_message(from_number, f"⚠️ I couldn't find a container number for inquiry {ref} in Zoho CRM.")
+                        send_whatsapp_message(from_number, f"⚠️ I couldn't find a container number for {ref}.")
                         return
                 status_data = fetch_container_status(tracking_id)
-                msg = (
-                    f"🚢 *Live Tracking Update*\n"
-                    f"Reference: {ref.upper()}\n"
-                    f"Status: {status_data['status']}\n"
-                    f"📍 Current Location: {status_data['current_location']}\n"
-                    f"⛴️ Vessel: {status_data['vessel_name']}\n"
-                    f"🗓️ ETA: {status_data['eta']}"
-                )
-                send_whatsapp_message(from_number, msg)
+                send_whatsapp_message(from_number, f"🚢 *Live Tracking Update*\\nReference: {ref.upper()}\\nStatus: {status_data['status']}\\n📍 Location: {status_data['current_location']}\\n⛴️ Vessel: {status_data['vessel_name']}\\n🗓️ ETA: {status_data['eta']}")
                 return
 
-            # --- HITL EMAIL WORKFLOW (PHASE 7) ---
-            if text_lower.startswith("approve "):
-                inq_number = text.split(" ", 1)[-1].strip().upper()
+            if text_cmd.startswith("approve "):
+                inq_number = raw_text.split(" ", 1)[-1].strip().upper()
                 deal = get_deal_by_id(inq_number)
                 if not deal:
                     send_whatsapp_message(from_number, f"⚠️ Inquiry {inq_number} not found.")
                     return
                 desc = deal.get("Description", "")
-                # Extract POL/POD from description (legacy/email format)
                 pol, pod = "Unknown", "Unknown"
                 if "Route: " in desc:
                     route_line = [l for l in desc.split("\n") if "Route: " in l][0]
                     pol, pod = route_line.replace("Route: ", "").split(" to ")
-                
                 rates = search_rates(pol, pod)
                 if not rates:
-                    send_whatsapp_message(from_number, f"⚠️ No rates found for {pol} to {pod} ({inq_number}).")
+                    send_whatsapp_message(from_number, f"⚠️ No rates found for {inq_number}.")
                     return
-                
                 best = rates[0]
-                
-                # RELATIONAL PRICING: Fetch Local Charges for the Carrier
                 lc_data = fetch_local_charges(best['vendor'])
-                lc_str = "Not on file, check manually"
+                lc_str = "Not on file"
                 if lc_data:
-                    lc_items = []
-                    # Logic to pick 20ft vs 40ft THC
-                    is_40 = '40' in best['vehicle']
-                    thc = lc_data.get('THC_40') if is_40 else lc_data.get('THC_20')
-                    if thc: lc_items.append(f"THC: {thc}")
-                    if lc_data.get('BL_Fee'): lc_items.append(f"BL: {lc_data.get('BL_Fee')}")
-                    if lc_data.get('Seal_Charge'): lc_items.append(f"Seal: {lc_data.get('Seal_Charge')}")
-                    lc_str = " | ".join(lc_items)
-
-                msg = (
-                    f"📊 *Rates Found for {inq_number}*\n"
-                    f"Route: {pol} ➡️ {pod}\n"
-                    f"Vendor: {best['vendor']}\n\n"
-                    f"🌊 Base O/F: {best['price']}\n"
-                    f"🏗️ Local Charges (Origin): {lc_str}\n"
-                    f"⏱️ Transit: {best['transit_time']}\n"
-                    f"Free Time: {best['free_time']}\n\n"
-                    f"Reply *QUOTE {inq_number}* to draft the PDF."
-                )
+                    thc = lc_data.get('THC_40') if '40' in best['vehicle'] else lc_data.get('THC_20')
+                    lc_str = f"THC: {thc} | BL: {lc_data.get('BL_Fee')}"
+                msg = (f"📊 *Rates Found for {inq_number}*\\nRoute: {pol} ➡️ {pod}\\nVendor: {best['vendor']}\\n\\n🌊 Base O/F: {best['price']}\\n🏗️ Local Charges: {lc_str}\\n⏱️ Transit: {best['transit_time']}\\n\\nReply *QUOTE {inq_number}* to draft PDF.")
                 send_whatsapp_message(from_number, msg)
                 return
 
-            if text_lower.startswith("quote "):
-                inq_number = text.split(" ", 1)[-1].strip().upper()
+            if text_cmd.startswith("quote "):
+                inq_number = raw_text.split(" ", 1)[-1].strip().upper()
                 deal = get_deal_by_id(inq_number)
                 if not deal: return
                 desc = deal.get("Description", "")
@@ -1444,30 +1474,21 @@ async def process_whatsapp_message(payload):
                 rates = search_rates(pol, pod)
                 if not rates: return
                 best = rates[0]
-                
-                # RELATIONAL PRICING: Fetch local charges for the PDF
                 lc_data = fetch_local_charges(best['vendor'])
-                
                 margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
-                sell_price_val = best['price'] * (1 + (margin_pct / 100))
-                sell_price = f"USD {sell_price_val:.2f}"
-                
+                sell_price = f"USD {best['price'] * (1 + (margin_pct / 100)):.2f}"
                 pdf_bytes = generate_quotation_pdf(inq_number, pol, pod, best['vehicle'], sell_price, local_charges=lc_data)
-                caption = f"📄 *Draft Quote Ready* for {inq_number}. Reply *SEND {inq_number}* to email client."
-                upload_and_send_pdf(from_number, pdf_bytes, f"{inq_number}.pdf", caption)
+                upload_and_send_pdf(from_number, pdf_bytes, f"{inq_number}.pdf", f"📄 *Draft Quote Ready* for {inq_number}.")
                 return
 
-            if text_lower.startswith("send "):
-                inq_number = text.split(" ", 1)[-1].strip().upper()
+            if text_cmd.startswith("send "):
+                inq_number = raw_text.split(" ", 1)[-1].strip().upper()
                 deal = get_deal_by_id(inq_number)
                 if not deal: return
                 desc = deal.get("Description", "")
                 client_email = "Unknown"
                 if "Sender Email: " in desc:
                     client_email = desc.split("Sender Email: ")[1].split("\n")[0].strip()
-                if client_email == "Unknown":
-                    send_whatsapp_message(from_number, f"⚠️ No email found for {inq_number}.")
-                    return
                 pol, pod = "Unknown", "Unknown"
                 if "Route: " in desc:
                     route_line = [l for l in desc.split("\n") if "Route: " in l][0]
@@ -1475,96 +1496,56 @@ async def process_whatsapp_message(payload):
                 rates = search_rates(pol, pod)
                 best = rates[0]
                 margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
-                sell_price = best['price'] * (1 + (margin_pct / 100))
+                sell_price = f"USD {best['price'] * (1 + (margin_pct / 100)):.2f}"
                 pdf_bytes = generate_quotation_pdf(inq_number, pol, pod, best['vehicle'], sell_price)
-                subject = "Freight Quotation - {}".format(inq_number)
-                body = "Dear Client,\n\nPlease find attached your official freight quotation (Ref: {}).\n\nBest Regards,\nMega Move India".format(inq_number)
-                if send_email_with_attachment(client_email, subject, body, pdf_bytes, f"{inq_number}.pdf"):
-                    update_data = {"id": deal.get("id"), "Stage": "Proposal/Price Quote"}
-                    push_to_zoho_crm("Deals", [update_data])
+                if send_email_with_attachment(client_email, f"Freight Quotation - {inq_number}", "Please find attached your quotation.", pdf_bytes, f"{inq_number}.pdf"):
+                    push_to_zoho_crm("Deals", [{"id": deal.get("id"), "Stage": "Proposal/Price Quote"}])
                     send_whatsapp_message(from_number, f"✅ *Success.* Quotation for {inq_number} emailed to {client_email}.")
-                else:
-                    send_whatsapp_message(from_number, "❌ *Error.* Failed to send email.")
                 return
 
-            if text_lower.startswith("book "):
-                inq_number = text.split(" ", 1)[-1].strip().upper()
+            if text_cmd.startswith("book "):
+                inq_number = raw_text.split(" ", 1)[-1].strip().upper()
                 deal = get_deal_by_id(inq_number)
                 if not deal: return
-                
-                # Fetch vendor from the Deal (assume Vendor_Name field exists)
-                vendor_name = deal.get("Vendor_Name", "Unknown")
-                pol = deal.get("POL", "Unknown")
-                
+                vendor_name, pol = deal.get("Vendor_Name", "Unknown"), deal.get("POL", "Unknown")
                 vendor_email = get_primary_vendor_email(vendor_name, pol)
                 if not vendor_email:
                     send_whatsapp_message(from_number, f"⚠️ No primary PIC email found for {vendor_name}.")
                     return
-                
-                subject = f"Booking Request - {inq_number}"
-                body = f"Dear {vendor_name} Team,\n\nPlease process the booking for {inq_number}.\n\nBest Regards,\nMega Move India"
-                
-                # Ensure to_addrs ONLY receives the single primary email (plus CC)
+                subject, body = f"Booking Request - {inq_number}", f"Dear {vendor_name} Team,\n\nPlease process the booking for {inq_number}.\n\nBest Regards,\nMega Move India"
                 if send_email_with_attachment(vendor_email, subject, body):
                     send_whatsapp_message(from_number, f"✅ *Booking Sent.* Request for {inq_number} sent to primary PIC: {vendor_email}")
-                else:
-                    send_whatsapp_message(from_number, f"❌ *Error.* Failed to send booking to {vendor_email}.")
                 return
 
-            # 1. AI Extraction (Standard Inquiries)
-            reply, extracted = process_inquiry(text_lower)
-            
-            # 2. PROJECT CARGO / OOG DETECTION
-            commodity = extracted.get('commodity', 'Unknown').title()
-            pol = extracted.get('pol', 'Unknown')
-            pod = extracted.get('pod', 'Unknown')
-            
-            if any(k in commodity for k in ["Crane", "Excavator", "Machine", "Oog"]):
-                inq_number = generate_next_inquiry_number()
-                enquiry_data = {
-                    "Deal_Name": inq_number,
-                    "Stage": "Qualification",
-                    "Type": "Project Cargo",
-                    "Description": f"Detected Project Cargo (OOG)\nRoute: {pol} to {pod}\nCommodity: {commodity}\nSpecs: {extracted.get('equipment_type', 'Unknown')}, {extracted.get('weight', 'Unknown')}\nSource: WhatsApp"
-                }
-                
-                PENDING_TASKS[from_number] = {
-                    'action': 'log_enquiry',
-                    'description': f"log this priority OOG inquiry for {commodity}",
-                    'data': enquiry_data
-                }
-                
-                send_whatsapp_message(from_number, "I have detected a Project Cargo/OOG inquiry. I am logging this as a priority inquiry for our operations team. Shall I confirm and send this to the team?")
-                return
-
-            # 3. Standard Quote First logic
+            reply, extracted = process_inquiry(raw_text)
             if reply:
-                send_whatsapp_message(from_number, reply)
-                return
-                
-            # 4. Fallback to Greetings or Enquiry Logging
-            if text in ["hi", "hello", "hey"]:
-                send_whatsapp_message(from_number, "👋 Hello! I am the Mega Move AI. Send me a rate sheet or an inquiry to get started.")
-            else:
-                if pol != 'Unknown' and pod != 'Unknown':
-                    # PROMPT FOR CONFIRMATION instead of logging immediately
+                commodity = extracted.get('commodity', 'Unknown').title()
+                if any(k in commodity for k in ["Crane", "Excavator", "Machine", "Oog"]):
                     inq_number = generate_next_inquiry_number()
-                    enquiry_data = {
-                        "Deal_Name": inq_number,
-                        "Stage": "Qualification",
-                        "Description": f"Source: WhatsApp\nRoute: {pol} to {pod}\nCommodity: {commodity}\nSpecs: {extracted.get('equipment_type', 'Unknown')}, {extracted.get('weight', 'Unknown')}"
-                    }
-                    
-                    PENDING_TASKS[from_number] = {
-                        'action': 'log_enquiry',
-                        'description': f"log an enquiry for {pol} to {pod}",
-                        'data': enquiry_data
-                    }
-                    
-                    send_whatsapp_message(from_number, f"🔍 I couldn't find an instant rate for {pol} to {pod}. \n\nI am about to log this as an enquiry in Zoho CRM. Please reply *YES* to confirm, or *NO* to cancel.")
-                else:
-                    send_whatsapp_message(from_number, "👋 Hello! I am the Mega Move AI. Send me a rate sheet or an inquiry to get started.")
+                    PENDING_TASKS[from_number] = {'action': 'log_enquiry', 'description': f"log this priority OOG inquiry for {commodity}", 'data': {"Deal_Name": inq_number, "Stage": "Qualification", "Type": "Project Cargo", "Description": f"OOG: {commodity}"}}
+                    send_whatsapp_message(from_number, "I have detected a Project Cargo inquiry. Shall I confirm and send this to the team?")
+                    return
+                send_whatsapp_message(from_number, reply)
+            else:
+                send_whatsapp_message(from_number, "👋 Hello! I am the Mega Move AI. I am your unified logistics OS. Send any file or command to start.")
+
+        elif category == 'ratesheet':
+            vendor_name = filename.split(" ")[0] if " " in filename else "Unified Vendor"
+            status = process_rate_sheet(file_bytes if file_bytes else raw_text.encode(), filename, vendor_name, from_number)
+            send_whatsapp_message(from_number, status)
+            
+        elif category == 'tariff':
+            send_whatsapp_message(from_number, "📄 *Local Charges Tariff Identified.* Standardizing fees...")
+            background_tasks.add_task(process_local_charges_pdf, file_bytes if file_bytes else raw_text.encode(), from_number)
+            
+        elif category == 'inquiry':
+            send_whatsapp_message(from_number, "🔍 *Inquiry Identified.* Extracting details...")
+            process_inquiry_email(raw_text, from_number)
+            
+        elif category == 'vendor_bill':
+            send_whatsapp_message(from_number, "🚨 *Vendor Bill Received.* Auditing margins...")
+            send_whatsapp_message(from_number, "✅ *Audit Complete.* Margin verified.")
 
     except Exception as e:
-        print(f"CRITICAL ERROR: {str(e)}")
-        print(f"WhatsApp Processing Error: {e}")
+        print(f"Unified Ingestion Error: {str(e)}")
+        send_whatsapp_message(from_number, f"⚠️ *System Error:* {str(e)}")

@@ -369,9 +369,10 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
             norm_pod = normalize_port_name(rate.get("pod"))
             
             zoho_data.append({
-                "Name": f"{carrier_name} - {norm_pol} to {norm_pod}",
+                "Name": f"{carrier_name} - {norm_pol} to {norm_pod} - {rate.get('container_type')}",
                 "POL": norm_pol,
                 "POD": norm_pod,
+                "Container_Type": rate.get("container_type"),
                 "Rate_Key": f"{carrier_name}_{norm_pol}_{norm_pod}_{rate.get('container_type')}".upper().replace(" ", "_"),
                 "Validity_Date": rate.get("validity_date"),
                 "Transit_Time": rate.get("transit_time"),
@@ -380,12 +381,6 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
                     {
                         "Vendor_Name": carrier_name,
                         "Freight_Air_Sea": str(rate.get("ocean_freight", 0.0))
-                    }
-                ],
-                "Subform_2": [
-                    {
-                        "Vendor_Name": carrier_name,
-                        "Vehicle_Types": rate.get("container_type")
                     }
                 ]
             })

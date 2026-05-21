@@ -1384,7 +1384,7 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
         file_bytes = None
 
         if msg_type == "text":
-            raw_text = message.get("text", {}).get("body", "")
+            raw_text = message.get("text", {}).get("body", "").strip()
         elif msg_type == "document":
             doc = message.get("document")
             caption = doc.get("caption", "")
@@ -1417,29 +1417,23 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
             await asyncio.sleep(8)
             images = IMAGE_BUFFER.pop(from_number, [])
             raw_text = await extract_raw_content(images[0], filename, "image")
-        
-        # --- PERMANENT CONVERSATIONAL DEFAULT SAFETY CATCHERS ---
-        # If there is a pending action waiting for your confirmation, intercept it immediately
+
+        # --- SAFETY CATCHER 1: PENDING CONFIRMATIONS (Yes/No tasks) ---
         if from_number in PENDING_TASKS:
             print(f"DEBUG: Active task pending for {from_number}. Routing directly to confirmation handler.")
             handle_confirmation(raw_text, from_number)
             return
 
-        # If you type a filler word out of nowhere, stop the bot from running its AI parser on it
+        # --- SAFETY CATCHER 2: CONVERSATIONAL FILLER WORDS ---
         if msg_type == "text" and raw_text.lower() in ["no", "yes", "cancel", "stop", "ok", "thanks", "thank you", "n", "y"]:
             send_whatsapp_message(from_number, "🛑 No active actions pending to confirm or cancel. Type *help* to see available commands.")
             return
 
-        # 2. COGNITIVE CLASSIFICATION (Only runs if you didn't say Yes/No/Cancel above)
-        classification = await classify_operational_intent(raw_text if msg_type == "text" else "", caption, raw_text)
-        category = classification.get('category')
-        target = classification.get('action_target')
-        print(f"DEBUG: Cognitive Classification: {category} (Target: {target})")
-
-        # 3. DYNAMIC ROUTING
-        if category == 'command':
-            # --- QUICK RATE LOOKUP BYPASS ---
-            rate_match = re.search(r"rate[s]? for (.+) to (.+)", raw_text, re.IGNORECASE)
+        # --- PERMANENT FIX: PRIORITY RATE CHECK BYPASS ---
+        # This checks for rates BEFORE the AI gets confused and thinks it's an email inquiry
+        if msg_type == "text" and any(k in raw_text.lower() for k in ["rate for", "rates for", "price for", "what is the rate"]):
+            print("DEBUG: Priority rate search phrase detected. Forcing rate check.")
+            rate_match = re.search(r"(?:rate[s]? for|price for|what is the rate for) (.+) [tT]o (.+)", raw_text, re.IGNORECASE)
             if rate_match:
                 pol_raw = rate_match.group(1).strip().strip("?")
                 pod_raw = rate_match.group(2).strip().strip("?")
@@ -1451,7 +1445,6 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                 
                 rates = search_rates(std_pol, std_pod)
                 if rates:
-                    # Group by vehicle type and pick best price
                     best_rates_by_type = {}
                     for r in rates:
                         v_type = r['vehicle']
@@ -1471,45 +1464,49 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                         )
                     
                     msg = (
-                        f"📊 *Quick Rate Check*\n"
-                        f"Route: {std_pol} ➡️ {std_pod}\n\n"
+                        f"🚢 *Quotation: {std_pol} ➡️ {std_pod}*\n\n"
                         f"{rates_text}"
-                        f"🏢 *Vendor:* {rates[0]['vendor']}"
+                        f"🏢 *Vendor:* {rates[0]['vendor']}\n"
+                        f"Ref: {generate_next_inquiry_number()}"
                     )
                     send_whatsapp_message(from_number, msg)
                 else:
                     send_whatsapp_message(from_number, f"⚠️ No active rates found for {std_pol} to {std_pod} in Zoho CRM.")
                 return
 
+        # 2. COGNITIVE CLASSIFICATION (Runs only if the text is not a rate check or a Yes/No)
+        classification = await classify_operational_intent(raw_text if msg_type == "text" else "", caption, raw_text)
+        category = classification.get('category')
+        target = classification.get('action_target')
+        print(f"DEBUG: Cognitive Classification: {category} (Target: {target})")
+
+        # 3. DYNAMIC ROUTING
+        if category == 'command':
             text_cmd = raw_text.lower()
             if any(k in text_cmd for k in ["help", "menu", "commands", "captions"]):
-                help_msg = ("🤖 *Mega Move AI - Unified Operating System*\\n\\n"
+                help_msg = ("🤖 *Mega Move AI - Unified Operating System*\n\n"
                             "You can send text commands or upload documents in *any format* (PDF, Excel, CSV, Images, or plain text). "
-                            "The AI will automatically identify and process the content.\\n\\n"
-                            "*💬 Text Commands:*\\n"
-                            "• *APPROVE [INQ-XXX]* : Calculates lowest rates & links local charges.\\n"
-                            "• *QUOTE [INQ-XXX]* : Generates the localized PDF quotation.\\n"
-                            "• *SEND [INQ-XXX]* : Emails the PDF to the client (CCs Hitesh).\\n"
-                            "• *Outstanding [Company]* : Pulls live ledgers from Zoho Books.\\n"
-                            "• *Metrics* : Displays current FY Dashboard in INR (Lakhs/Crores).\\n\\n"
-                            "*📄 Universal Document Ingestion:*\\n"
+                            "The AI will automatically identify and process the content.\n\n"
+                            "*💬 Text Commands:*\n"
+                            "• *APPROVE [INQ-XXX]* : Calculates lowest rates & links local charges.\n"
+                            "• *QUOTE [INQ-XXX]* : Generates the localized PDF quotation.\n"
+                            "• *SEND [INQ-XXX]* : Emails the PDF to the client (CCs Hitesh).\n"
+                            "• *Outstanding [Company]* : Pulls live ledgers from Zoho Books.\n"
+                            "• *Metrics* : Displays current FY Dashboard in INR (Lakhs/Crores).\n\n"
+                            "*📄 Universal Document Ingestion:*\n"
                             "Simply drop any file or snapshot (Rate Sheets, Carrier Tariffs, Vendor Bills, or Customer Emails). "
                             "The system will auto-classify and update your databases instantly.")
                 send_whatsapp_message(from_number, help_msg)
-                return
-
-            if from_number in PENDING_TASKS:
-                handle_confirmation(raw_text, from_number)
                 return
             
             if text_cmd.startswith("metrics"):
                 period = "overall" if "overall" in text_cmd else "FY"
                 crm, fin = get_crm_snapshot(period=period), get_financial_snapshot(period=period)
                 _, _, fy_label = get_fy_start()
-                msg = (f"📊 *MEGA MOVE - EXECUTIVE DASHBOARD*\\nTarget Period: {'Current FY ('+fy_label+')' if period=='FY' else 'Lifetime / Overall'}\\n\\n"
-                       f"📈 *Sales Pipeline:*\\n• Total Inquiries Received: {crm['inquiries']}\\n• Shipments Booked (Won): {crm['booked']}\\n• Sales Conversion Rate: {crm['conversion']:.1f}%\\n\\n"
-                       f"💼 *Financial Health:*\\n• Total Invoice Revenue: {format_inr(fin['revenue'])}\\n• Total Operational Costs: {format_inr(fin['costs'])}\\n• Projected Net Margin: *{format_inr(fin['profit'])}*\\n\\n"
-                       f"🛠️ *Operations:*\\n• Pending Carrier Bookings: Check Zoho Tasks")
+                msg = (f"📊 *MEGA MOVE - EXECUTIVE DASHBOARD*\nTarget Period: {'Current FY ('+fy_label+')' if period=='FY' else 'Lifetime / Overall'}\n\n"
+                       f"📈 *Sales Pipeline:*\n• Total Inquiries Received: {crm['inquiries']}\n• Shipments Booked (Won): {crm['booked']}\n• Sales Conversion Rate: {crm['conversion']:.1f}%\n\n"
+                       f"💼 *Financial Health:*\n• Total Invoice Revenue: {format_inr(fin['revenue'])}\n• Total Operational Costs: {format_inr(fin['costs'])}\n• Projected Net Margin: *{format_inr(fin['profit'])}*\n\n"
+                       f"🛠️ *Operations:*\n• Pending Carrier Bookings: Check Zoho Tasks")
                 send_whatsapp_message(from_number, msg)
                 return
 
@@ -1523,7 +1520,7 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                         send_whatsapp_message(from_number, f"⚠️ I couldn't find a container number for {ref}.")
                         return
                 status_data = fetch_container_status(tracking_id)
-                send_whatsapp_message(from_number, f"🚢 *Live Tracking Update*\\nReference: {ref.upper()}\\nStatus: {status_data['status']}\\n📍 Location: {status_data['current_location']}\\n⛴️ Vessel: {status_data['vessel_name']}\\n🗓️ ETA: {status_data['eta']}")
+                send_whatsapp_message(from_number, f"🚢 *Live Tracking Update*\nReference: {ref.upper()}\nStatus: {status_data['status']}\n📍 Location: {status_data['current_location']}\n⛴️ Vessel: {status_data['vessel_name']}\n🗓️ ETA: {status_data['eta']}")
                 return
 
             if text_cmd.startswith("approve "):
@@ -1547,7 +1544,7 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                 if lc_data:
                     thc = lc_data.get('THC_40') if '40' in best['vehicle'] else lc_data.get('THC_20')
                     lc_str = f"THC: {thc} | BL: {lc_data.get('BL_Fee')}"
-                msg = (f"📊 *Rates Found for {inq_number}*\\nRoute: {pol} ➡️ {pod}\\nVendor: {best['vendor']}\\n\\n🌊 Base O/F: {best['price']}\\n🏗️ Local Charges: {lc_str}\\n⏱️ Transit: {best['transit_time']}\\n\\nReply *QUOTE {inq_number}* to draft PDF.")
+                msg = (f"📊 *Rates Found for {inq_number}*\nRoute: {pol} ➡️ {pod}\nVendor: {best['vendor']}\n\n🌊 Base O/F: {best['price']}\n🏗️ Local Charges: {lc_str}\n⏱️ Transit: {best['transit_time']}\n\nReply *QUOTE {inq_number}* to draft PDF.")
                 send_whatsapp_message(from_number, msg)
                 return
 
@@ -1624,11 +1621,9 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
             send_whatsapp_message(from_number, status)
             
         elif category == 'tariff':
-            send_whatsapp_message(from_number, "📄 *Local Charges Tariff Identified.* Standardizing fees...")
             background_tasks.add_task(process_local_charges_pdf, file_bytes if file_bytes else raw_text.encode(), from_number)
             
         elif category == 'inquiry':
-            send_whatsapp_message(from_number, "🔍 *Inquiry Identified.* Extracting details...")
             process_inquiry_email(raw_text, from_number)
             
         elif category == 'vendor_bill':

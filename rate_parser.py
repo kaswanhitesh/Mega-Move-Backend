@@ -36,6 +36,25 @@ import os
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
+def safe_float(value, default=0.0):
+    """
+    Safely convert a value to float, handling comma separators.
+    
+    Examples:
+    - "12,220" -> 12220.0
+    - "1,234.56" -> 1234.56
+    - "5000" -> 5000.0
+    - None -> 0.0
+    """
+    try:
+        if value is None or value == '':
+            return default
+        # Remove commas and convert to float
+        return float(str(value).replace(',', ''))
+    except (ValueError, AttributeError):
+        return default
+
+
 class LocalCharge:
     """
     Represents a single component of local charges.
@@ -287,8 +306,8 @@ Return valid JSON only."""
                     rate.carrier = carrier_name
                     rate.pol = rate_data.get('pol', '')
                     rate.pod = rate_data.get('pod', '')
-                    rate.rate_20 = float(rate_data.get('rate_20', 0))
-                    rate.rate_40 = float(rate_data.get('rate_40', 0))
+                    rate.rate_20 = safe_float(rate_data.get('rate_20', 0))
+                    rate.rate_40 = safe_float(rate_data.get('rate_40', 0))
                     rate.transit_time = rate_data.get('transit_time', '')
                     rate.routing = rate_data.get('routing', '')
                     
@@ -306,8 +325,8 @@ Return valid JSON only."""
                 for sc_data in extracted['surcharges']:
                     sc = Surcharge(
                         surcharge_type=sc_data.get('type', ''),
-                        amount_20=float(sc_data.get('amount_20', 0)),
-                        amount_40=float(sc_data.get('amount_40', 0)),
+                        amount_20=safe_float(sc_data.get('amount_20', 0)),
+                        amount_40=safe_float(sc_data.get('amount_40', 0)),
                         currency='USD',
                         applicability=sc_data.get('applicability', 'ALL')
                     )
@@ -318,7 +337,7 @@ Return valid JSON only."""
                 for lc_data in extracted['local_charges']:
                     lc = LocalCharge(
                         charge_type=lc_data.get('charge_type', ''),
-                        amount=float(lc_data.get('amount', 0)),
+                        amount=safe_float(lc_data.get('amount', 0)),
                         currency=lc_data.get('currency', 'USD'),
                         unit=lc_data.get('unit', 'Per Container'),
                         container_size=lc_data.get('container_size', 'ALL'),
@@ -391,8 +410,8 @@ Return valid JSON only."""
                 rate.carrier = carrier_name
                 rate.pol = rate_data.get('pol', '')
                 rate.pod = rate_data.get('pod', '')
-                rate.rate_20 = float(rate_data.get('rate_20', 0))
-                rate.rate_40 = float(rate_data.get('rate_40', 0))
+                rate.rate_20 = safe_float(rate_data.get('rate_20', 0))
+                rate.rate_40 = safe_float(rate_data.get('rate_40', 0))
                 rate.transit_time = rate_data.get('transit_time', '')
                 rate.routing = rate_data.get('routing', '')
                 
@@ -409,8 +428,8 @@ Return valid JSON only."""
             for sc_data in extracted['surcharges']:
                 sc = Surcharge(
                     surcharge_type=sc_data.get('type', ''),
-                    amount_20=float(sc_data.get('amount_20', 0)),
-                    amount_40=float(sc_data.get('amount_40', 0)),
+                    amount_20=safe_float(sc_data.get('amount_20', 0)),
+                    amount_40=safe_float(sc_data.get('amount_40', 0)),
                     currency='USD',
                     applicability=sc_data.get('applicability', 'ALL')
                 )
@@ -421,7 +440,7 @@ Return valid JSON only."""
             for lc_data in extracted['local_charges']:
                 lc = LocalCharge(
                     charge_type=lc_data.get('charge_type', ''),
-                    amount=float(lc_data.get('amount', 0)),
+                    amount=safe_float(lc_data.get('amount', 0)),
                     currency=lc_data.get('currency', 'USD'),
                     unit=lc_data.get('unit', 'Per Container'),
                     container_size=lc_data.get('container_size', 'ALL'),

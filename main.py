@@ -831,25 +831,16 @@ def process_local_charges_pdf(file_bytes, wa_id=None):
 
 
 def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
-   try:
-        # Step 1: Tell the user we're starting to process
+    try:
         if wa_id:
             send_whatsapp_message(wa_id, "📥 *Rate sheet received.* Analyzing complete commercial structure...")
         
-        # Step 2: Call the enhanced parser (this is where the magic happens)
-        # The enhanced parser is like a specialist who knows how to read every detail
-        # It returns three separate lists:
-        #   - ocean_freight_rates: The main rates with transit times, routing, validity
-        #   - surcharges: All the extra fees like EBS, LSR, etc.
-        #   - local_charges: THC, documentation fees, broken down by terminal and cargo type
-        
         ocean_freight_rates, surcharges, local_charges = parse_rate_sheet_enhanced(
-            file_content,   # The actual file (Excel or PDF as bytes)
-            filename,       # The filename (helps the parser understand the format)
-            vendor_name     # The carrier name (PIL, Econship, etc.)
+            file_content,
+            filename,
+            vendor_name
         )
         
-        # Step 3: Tell the user what we found
         if wa_id:
             send_whatsapp_message(
                 wa_id, 
@@ -860,64 +851,68 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
                 f"Now uploading to Zoho CRM..."
             )
         
-        # Step 4: Transform the extracted data into Zoho's format
-        # This is like taking ingredients the specialist prepared and arranging them
-        # on plates according to how your Zoho CRM expects to receive them
-        
         zoho_pricing_records = []
         
         for rate in ocean_freight_rates:
-            # Each rate becomes one record in Zoho's Pricings module
-            # We're building a dictionary (like a form) with all the fields filled in
-            
             pricing_record = {
-                # Basic identification fields (you already have these)
                 "Name": f"{rate.carrier} - {rate.pol} to {rate.pod}",
                 "POL": rate.pol,
                 "POD": rate.pod,
-                
-                # The ocean freight rate itself
-                # Note: Adjust "Subform_3" and "Freight_Air_Sea" to match whatever
-                # you actually named these fields in your Zoho CRM
                 "Subform_3": [{
                     "Vendor_Name": rate.carrier,
                     "Freight_Air_Sea": str(rate.rate_40)
                 }],
-                
-                # NEW ENHANCED FIELDS (these are what makes this system intelligent)
-                # These are the fields you added in Zoho following the setup guide
                 "Transit_Time": rate.transit_time,
                 "Routing": rate.routing,
                 "Free_Time_Days": rate.free_time_days,
-                
-                # Validity date needs to be formatted as YYYY-MM-DD for Zoho
                 "Validity_End": rate.validity_end.strftime("%Y-%m-%d") if rate.validity_end else None,
-                
-                # Version tracking so you can see when this rate was uploaded
                 "Rate_Version": rate.rate_version,
-                
-                # Detention rates (what you pay per day if container sits too long)
                 "Detention_Rate_20": rate.detention_rate_20,
                 "Detention_Rate_40": rate.detention_rate_40,
             }
-            
-            # Add this record to our list
             zoho_pricing_records.append(pricing_record)
         
-        # Step 5: Upload everything to Zoho CRM
-        # We do this in batches because Zoho has limits on how many records
-        # you can create at once (like a restaurant that can only cook 50 meals at a time)
-        
         if not zoho_pricing_records:
-            # If we found zero rates, something went wrong with the parsing
             if wa_id:
                 send_whatsapp_message(
                     wa_id,
-                    "⚠️ *Warning:* Rate sheet was processed but no rates were extracted. "
-                    "Please check if the file format is correct."
+                    "⚠️ *Warning:* Rate sheet was processed but no rates were extracted."
                 )
             return "No rates extracted"
         
+        batch_size = 50
+        total_uploaded = 0
+        
+        for i in range(0, len(zoho_pricing_records), batch_size):
+            batch = zoho_pricing_records[i:i + batch_size]
+            push_to_zoho_crm("Pricings", batch)
+            total_uploaded += len(batch)
+            
+            if wa_id and len(zoho_pricing_records) > 50:
+                send_whatsapp_message(
+                    wa_id,
+                    f"⏳ Uploaded {total_uploaded} of {len(zoho_pricing_records)} rates..."
+                )
+        
+        if wa_id:
+            summary_msg = (
+                f"✅ *Upload Complete!*\n\n"
+                f"Carrier: *{vendor_name}*\n"
+                f"Total Rates: {len(zoho_pricing_records)}\n"
+                f"Surcharges Captured: {len(surcharges)}\n"
+                f"Local Charges: {len(local_charges)}\n\n"
+                f"All pricing data is now available for intelligent queries."
+            )
+            send_whatsapp_message(wa_id, summary_msg)
+        
+        return f"Successfully processed {len(zoho_pricing_records)} rates"
+        
+    except Exception as e:
+        error_msg = f"❌ *Error processing rate sheet:* {str(e)}"
+        print(f"CRITICAL ERROR in rate sheet processing: {e}")
+        if wa_id:
+            send_whatsapp_message(wa_id, error_msg)
+        return error_msg        
         batch_size = 50  # Upload 50 records at a time
         total_uploaded = 0
         

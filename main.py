@@ -21,6 +21,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 import glob
+from rate_parser import parse_rate_sheet as parse_rate_sheet_enhanced
+from pricing_engine import get_pricing_recommendation, format_pricing_breakdown_for_whatsapp
 
 # --- GLOBAL STATE ---
 PENDING_TASKS = {}
@@ -829,91 +831,136 @@ def process_local_charges_pdf(file_bytes, wa_id=None):
 
 
 def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
-    try:
+   try:
+        # Step 1: Tell the user we're starting to process
         if wa_id:
-            send_whatsapp_message(wa_id, "📥 *Received document.* Analyzing content...")
-        if filename.endswith(".xlsx") or filename.endswith(".xls"):
-            all_sheets = pd.read_excel(io.BytesIO(file_content), sheet_name=None)
-            raw_data = ""
-            for sheet_name, df in all_sheets.items():
-                df = df.dropna(how='all').dropna(axis=1, how='all')
-                raw_data += f"\n--- SHEET: {sheet_name} ---\n{df.to_csv(index=False)}\n"
-        else:
-            pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
-            raw_data = "".join([page.extract_text() for page in pdf_reader.pages])
-        doc_type = classify_pdf_content(raw_data)
-        print(f"DEBUG: Document classified as {doc_type}")
-        if doc_type == 'INQUIRY_EMAIL':
-            if wa_id:
-                send_whatsapp_message(wa_id, "🔍 *Detected:* Inquiry Email. Processing Inquiry...")
-            return process_inquiry_email(raw_data, wa_id)
-        system_prompt = (
-            "You are an expert freight rate parser. Extract EVERY SINGLE freight rate across ALL sheets. "
-            "Output strictly valid JSON with a 'rates' key containing an array. Each rate must have: "
-            "'pol', 'pod', 'container_type', 'ocean_freight', 'transit_time', 'route', 'validity_date'."
+            send_whatsapp_message(wa_id, "📥 *Rate sheet received.* Analyzing complete commercial structure...")
+        
+        # Step 2: Call the enhanced parser (this is where the magic happens)
+        # The enhanced parser is like a specialist who knows how to read every detail
+        # It returns three separate lists:
+        #   - ocean_freight_rates: The main rates with transit times, routing, validity
+        #   - surcharges: All the extra fees like EBS, LSR, etc.
+        #   - local_charges: THC, documentation fees, broken down by terminal and cargo type
+        
+        ocean_freight_rates, surcharges, local_charges = parse_rate_sheet_enhanced(
+            file_content,   # The actual file (Excel or PDF as bytes)
+            filename,       # The filename (helps the parser understand the format)
+            vendor_name     # The carrier name (PIL, Econship, etc.)
         )
-        prompt = f"VENDOR NAME: {vendor_name}\nFILE NAME: {filename}\n\nRAW DATA:\n{raw_data[:100000]}"
+        
+        # Step 3: Tell the user what we found
         if wa_id:
-            send_whatsapp_message(wa_id, "🧠 *Analyzing rates...* Extracting POL, POD, and pricing. (This might take a few seconds)")
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
-        )
-        extracted_rates = json.loads(response.choices[0].message.content).get("rates", [])
-        dedup_map = {}
-        for rate in extracted_rates:
-            carrier = rate.get('shipper', vendor_name)
-            pol = rate.get('pol', 'Unknown')
-            pod = rate.get('pod', 'Unknown')
-            eq_type = rate.get('container_type', 'Unknown')
-            current_price = extract_numeric_price(rate.get('ocean_freight'))
-            if current_price == float('inf') or current_price <= 0: continue
-            key = (carrier, pol, pod, eq_type)
-            if key in dedup_map:
-                if current_price < extract_numeric_price(dedup_map[key].get('ocean_freight')):
-                    dedup_map[key] = rate
-            else:
-                dedup_map[key] = rate
-        if wa_id:
-            send_whatsapp_message(wa_id, f"✅ *Extracted {len(extracted_rates)} rates.* Deduplicated to {len(dedup_map)} best prices. Mapping PICs...")
-        zoho_data = []
-        for key, rate in dedup_map.items():
-            carrier_name, pol_raw, pod_raw, eq_type = key
-            norm_pol = normalize_port_name(pol_raw)
-            norm_pod = normalize_port_name(pod_raw)
-            mapped_email = get_primary_vendor_email(carrier_name, norm_pol)
-            r_key = f"{carrier_name}_{norm_pol}_{norm_pod}_{eq_type}".upper().replace(" ", "_")
-            zoho_data.append({
-                "Name": f"{carrier_name} - {norm_pol} to {norm_pod} - {eq_type}",
-                "POL": norm_pol, "POD": norm_pod,
-                "Container_Type": str(eq_type),
-                "Transit_Time": str(rate.get("transit_time", "Unknown")),
-                "Route": str(rate.get("route", "Unknown")),
-                "Rate_Key": str(r_key),
-                "Validity_Date": rate.get("validity_date", "Unknown"),
-                "Vendor_Email": mapped_email or "Unknown",
-                "Subform_3": [{"Vendor_Name": carrier_name, "Freight_Air_Sea": str(rate.get("ocean_freight", 0.0))}]
-            })
-        if zoho_data:
-            unique_vendors = ", ".join(list(set([r.get("Name").split(" - ")[0] for r in zoho_data])))
-            PENDING_TASKS[wa_id] = {'action': 'upload_rates', 'description': f"upload {len(zoho_data)} rates from {unique_vendors}", 'data': zoho_data}
-            summary = (
-                f"📊 *Extraction Complete!*\n\n"
-                f"Found {len(zoho_data)} total rates.\n"
-                f"Vendors: {unique_vendors}\n\n"
-                f"I am about to upload these rates to Zoho CRM. Please reply *YES* to confirm, or *NO* to cancel."
+            send_whatsapp_message(
+                wa_id, 
+                f"✅ *Extraction complete!*\n\n"
+                f"📊 Ocean Freight Rates: {len(ocean_freight_rates)}\n"
+                f"💵 Surcharges: {len(surcharges)}\n"
+                f"🏗️ Local Charges: {len(local_charges)}\n\n"
+                f"Now uploading to Zoho CRM..."
             )
+        
+        # Step 4: Transform the extracted data into Zoho's format
+        # This is like taking ingredients the specialist prepared and arranging them
+        # on plates according to how your Zoho CRM expects to receive them
+        
+        zoho_pricing_records = []
+        
+        for rate in ocean_freight_rates:
+            # Each rate becomes one record in Zoho's Pricings module
+            # We're building a dictionary (like a form) with all the fields filled in
+            
+            pricing_record = {
+                # Basic identification fields (you already have these)
+                "Name": f"{rate.carrier} - {rate.pol} to {rate.pod}",
+                "POL": rate.pol,
+                "POD": rate.pod,
+                
+                # The ocean freight rate itself
+                # Note: Adjust "Subform_3" and "Freight_Air_Sea" to match whatever
+                # you actually named these fields in your Zoho CRM
+                "Subform_3": [{
+                    "Vendor_Name": rate.carrier,
+                    "Freight_Air_Sea": str(rate.rate_40)
+                }],
+                
+                # NEW ENHANCED FIELDS (these are what makes this system intelligent)
+                # These are the fields you added in Zoho following the setup guide
+                "Transit_Time": rate.transit_time,
+                "Routing": rate.routing,
+                "Free_Time_Days": rate.free_time_days,
+                
+                # Validity date needs to be formatted as YYYY-MM-DD for Zoho
+                "Validity_End": rate.validity_end.strftime("%Y-%m-%d") if rate.validity_end else None,
+                
+                # Version tracking so you can see when this rate was uploaded
+                "Rate_Version": rate.rate_version,
+                
+                # Detention rates (what you pay per day if container sits too long)
+                "Detention_Rate_20": rate.detention_rate_20,
+                "Detention_Rate_40": rate.detention_rate_40,
+            }
+            
+            # Add this record to our list
+            zoho_pricing_records.append(pricing_record)
+        
+        # Step 5: Upload everything to Zoho CRM
+        # We do this in batches because Zoho has limits on how many records
+        # you can create at once (like a restaurant that can only cook 50 meals at a time)
+        
+        if not zoho_pricing_records:
+            # If we found zero rates, something went wrong with the parsing
             if wa_id:
-                send_whatsapp_message(wa_id, summary)
-            return summary
-        return "No rates could be extracted."
-    except Exception as e:
-        print(f"CRITICAL ERROR: {str(e)}")
+                send_whatsapp_message(
+                    wa_id,
+                    "⚠️ *Warning:* Rate sheet was processed but no rates were extracted. "
+                    "Please check if the file format is correct."
+                )
+            return "No rates extracted"
+        
+        batch_size = 50  # Upload 50 records at a time
+        total_uploaded = 0
+        
+        for i in range(0, len(zoho_pricing_records), batch_size):
+            batch = zoho_pricing_records[i:i + batch_size]
+            
+            # This calls your existing Zoho upload function
+            # push_to_zoho_crm should already exist in your main.py
+            push_to_zoho_crm("Pricings", batch)
+            
+            total_uploaded += len(batch)
+            
+            # Give progress updates for large uploads
+            if wa_id and len(zoho_pricing_records) > 50:
+                send_whatsapp_message(
+                    wa_id,
+                    f"⏳ Uploaded {total_uploaded} of {len(zoho_pricing_records)} rates..."
+                )
+        
+        # Step 6: Send success message with summary
         if wa_id:
-            send_whatsapp_message(wa_id, f"❌ *Error:* {str(e)}")
-        return f"Error processing rate sheet: {e}"
-
+            summary_msg = (
+                f"✅ *Upload Complete!*\n\n"
+                f"Carrier: *{vendor_name}*\n"
+                f"Total Rates: {len(zoho_pricing_records)}\n"
+                f"Surcharges Captured: {len(surcharges)}\n"
+                f"Local Charges: {len(local_charges)}\n\n"
+                f"All pricing data is now available for intelligent queries.\n"
+                f"Try: *APPROVE INQ-XXX* to see complete breakdowns."
+            )
+            send_whatsapp_message(wa_id, summary_msg)
+        
+        return f"Successfully processed {len(zoho_pricing_records)} rates"
+        
+    except Exception as e:
+        # If anything goes wrong, log the error and notify the user
+        error_msg = f"❌ *Error processing rate sheet:* {str(e)}"
+        print(f"CRITICAL ERROR in rate sheet processing: {e}")
+        
+        if wa_id:
+            send_whatsapp_message(wa_id, error_msg)
+        
+        return error_msg
 
 def handle_confirmation(text, sender_wa_id):
     user_text = str(text).strip().upper()

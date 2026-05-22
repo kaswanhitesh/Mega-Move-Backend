@@ -864,11 +864,11 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
                 }],
                 "Transit_Time": rate.transit_time,
                 "Route": rate.routing,
-                "Free_Time_Days": rate.Free_Days_Time,
+               # "Free_Time_Days": rate.Free_Days_Time,
                 "Validity_Date": rate.validity_end.strftime("%Y-%m-%d") if rate.validity_end else None,
-                "Rate_Version": rate.rate_version,
-                "Detention_Rate_20": rate.detention_rate_20,
-                "Detention_Rate_40": rate.detention_rate_40,
+               # "Rate_Version": rate.rate_version,
+               # "Detention_Rate_20": rate.detention_rate_20,
+               # "Detention_Rate_40": rate.detention_rate_40,
             }
             zoho_pricing_records.append(pricing_record)
         

@@ -40,11 +40,12 @@ async def run_daily_financial_audit():
         for inv in overdue_invoices:
             days = inv.get("days_overdue", "3+")
             msg = (
-                f"*Overdue Payment Alert*\n"
+                f"⚠️ *Overdue Payment Alert*\n"
                 f"Client: {inv.get('customer_name')}\n"
                 f"Invoice: {inv.get('invoice_number')}\n"
                 f"Amount: {inv.get('currency_code')} {inv.get('total')}\n"
-                f"Days Overdue: {days}"
+                f"Days Overdue: {days}\n"
+                f"*Draft Reply:* \"Hi {inv.get('customer_name')}, gentle reminder regarding invoice {inv.get('invoice_number')}. Please let us know the status of payment.\""
             )
             send_whatsapp_message(admin_number, msg)
     except Exception as e:
@@ -53,12 +54,12 @@ async def run_daily_financial_audit():
         mismatches = check_vendor_bill_mismatches()
         for m in mismatches:
             msg = (
-                f"*Margin Mismatch Alert*\n"
+                f"🚨 *Margin Mismatch Alert*\n"
                 f"Vendor: {m.get('vendor_name')}\n"
                 f"Bill: {m.get('bill_number')}\n"
-                f"Billed: {m.get('bill_amount')}\n"
-                f"Expected: {m.get('crm_expected')}\n"
-                f"Variance: {m.get('variance')}%"
+                f"Billed Amount: {m.get('bill_amount')}\n"
+                f"CRM Expected Cost: {m.get('crm_expected')}\n"
+                f"Variance: {m.get('variance')}% - *Action Required in Zoho Books*"
             )
             send_whatsapp_message(admin_number, msg)
     except Exception as e:
@@ -698,13 +699,13 @@ def process_inquiry(text):
         return None, extracted
     best = rates[0]
     reply = (
-        f"Rates found for {pol} to {pod}\n\n"
-        f"Vendor: {best['vendor']}\n"
-        f"Ocean Freight: USD {best['price']}\n"
-        f"Container: {best['vehicle']}\n"
-        f"Transit: {best['transit_time']}\n"
-        f"Valid till: {best['validity_date']}\n\n"
-        f"Reply APPROVE INQ-MMI-2026-XXX to generate a PDF quotation."
+        f"📦 *Rates found for {pol} ➡️ {pod}*\n\n"
+        f"🏢 Vendor: {best['vendor']}\n"
+        f"💰 Ocean Freight: USD {best['price']}\n"
+        f"🚢 Container: {best['vehicle']}\n"
+        f"⏱️ Transit: {best['transit_time']}\n"
+        f"📅 Valid till: {best['validity_date']}\n\n"
+        f"Reply *APPROVE INQ-MMI-2026-XXX* to generate a PDF quotation."
     )
     return reply, extracted
 
@@ -743,13 +744,13 @@ def process_inquiry_email(raw_data, wa_id=None):
         }
         if wa_id:
             PENDING_TASKS[wa_id] = {'action': 'log_enquiry', 'description': f"log an enquiry for {pol} to {pod}", 'module': 'New Enquiries', 'data': enquiry_data}
-            send_whatsapp_message(wa_id, f"Inquiry Parsed!\n\nShipper: {shipper}\nRoute: {pol} to {pod}\n\nReply YES to log this in Zoho CRM.")
+            send_whatsapp_message(wa_id, f"📊 *Inquiry Parsed!*\n\nShipper: {shipper}\nRoute: {pol} to {pod}\n\nReply *YES* to log this as a New Enquiry in Zoho CRM.")
             return "Parsed"
         return "Inquiry processed successfully."
     except Exception as e:
         print(f"CRITICAL ERROR (Inquiry PDF): {e}")
         if wa_id:
-            send_whatsapp_message(wa_id, f"Error parsing inquiry: {str(e)}")
+            send_whatsapp_message(wa_id, f"❌ *Error parsing inquiry:* {str(e)}")
         return f"Error: {e}"
 
 
@@ -809,8 +810,8 @@ def process_local_charges_pdf(file_bytes, wa_id=None):
         pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
         raw_text = "".join([page.extract_text() for page in pdf_reader.pages])
         system_prompt = (
-            "You are an expert pricing analyst. Extract local charges from this carrier tariff. "
-            "Output JSON only: {\"carrier\": \"\", \"thc_20\": \"\", \"thc_40\": \"\", \"bl_fee\": \"\", \"seal_charge\": \"\", \"toll\": \"\", \"muc\": \"\"}"
+            "You are an expert pricing analyst. Extract the standard local charges from this carrier tariff. "
+            "Output strictly as JSON: {'carrier': '...', 'thc_20': '...', 'thc_40': '...', 'bl_fee': '...', 'seal_charge': '...', 'toll': '...', 'muc': '...'}"
         )
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -820,17 +821,17 @@ def process_local_charges_pdf(file_bytes, wa_id=None):
         data = json.loads(response.choices[0].message.content)
         push_to_zoho_crm("Local_Charges_Tariff", [{"Carrier_Name": data.get("carrier"), "THC_20": data.get("thc_20"), "THC_40": data.get("thc_40"), "BL_Fee": data.get("bl_fee"), "Seal_Charge": data.get("seal_charge"), "Toll": data.get("toll"), "MUC": data.get("muc")}])
         if wa_id:
-            send_whatsapp_message(wa_id, f"Local Charges Updated for {data.get('carrier')}.")
+            send_whatsapp_message(wa_id, f"✅ *Local Charges Updated* for {data.get('carrier')}. Ready for relational pricing.")
     except Exception as e:
         print(f"Local Charges Error: {e}")
         if wa_id:
-            send_whatsapp_message(wa_id, f"Error parsing local charges: {str(e)}")
+            send_whatsapp_message(wa_id, f"❌ *Error parsing local charges:* {str(e)}")
 
 
 def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
     try:
         if wa_id:
-            send_whatsapp_message(wa_id, "Received document. Analyzing content...")
+            send_whatsapp_message(wa_id, "📥 *Received document.* Analyzing content...")
         if filename.endswith(".xlsx") or filename.endswith(".xls"):
             all_sheets = pd.read_excel(io.BytesIO(file_content), sheet_name=None)
             raw_data = ""
@@ -844,15 +845,16 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         print(f"DEBUG: Document classified as {doc_type}")
         if doc_type == 'INQUIRY_EMAIL':
             if wa_id:
-                send_whatsapp_message(wa_id, "Detected Inquiry Email. Processing...")
+                send_whatsapp_message(wa_id, "🔍 *Detected:* Inquiry Email. Processing Inquiry...")
             return process_inquiry_email(raw_data, wa_id)
         system_prompt = (
-            "You are an expert freight rate parser. Extract every freight rate. "
-            "Return JSON with a 'rates' key. Each rate must have: pol, pod, container_type, ocean_freight, transit_time, route, validity_date."
+            "You are an expert freight rate parser. Extract EVERY SINGLE freight rate across ALL sheets. "
+            "Output strictly valid JSON with a 'rates' key containing an array. Each rate must have: "
+            "'pol', 'pod', 'container_type', 'ocean_freight', 'transit_time', 'route', 'validity_date'."
         )
-        prompt = f"VENDOR: {vendor_name}\nFILE: {filename}\n\nDATA:\n{raw_data[:100000]}"
+        prompt = f"VENDOR NAME: {vendor_name}\nFILE NAME: {filename}\n\nRAW DATA:\n{raw_data[:100000]}"
         if wa_id:
-            send_whatsapp_message(wa_id, "Analyzing rates... Extracting POL, POD, and pricing.")
+            send_whatsapp_message(wa_id, "🧠 *Analyzing rates...* Extracting POL, POD, and pricing. (This might take a few seconds)")
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
@@ -868,10 +870,13 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
             current_price = extract_numeric_price(rate.get('ocean_freight'))
             if current_price == float('inf') or current_price <= 0: continue
             key = (carrier, pol, pod, eq_type)
-            if key not in dedup_map or current_price < extract_numeric_price(dedup_map[key].get('ocean_freight')):
+            if key in dedup_map:
+                if current_price < extract_numeric_price(dedup_map[key].get('ocean_freight')):
+                    dedup_map[key] = rate
+            else:
                 dedup_map[key] = rate
         if wa_id:
-            send_whatsapp_message(wa_id, f"Extracted {len(extracted_rates)} rates. Deduplicated to {len(dedup_map)} best prices.")
+            send_whatsapp_message(wa_id, f"✅ *Extracted {len(extracted_rates)} rates.* Deduplicated to {len(dedup_map)} best prices. Mapping PICs...")
         zoho_data = []
         for key, rate in dedup_map.items():
             carrier_name, pol_raw, pod_raw, eq_type = key
@@ -893,7 +898,12 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         if zoho_data:
             unique_vendors = ", ".join(list(set([r.get("Name").split(" - ")[0] for r in zoho_data])))
             PENDING_TASKS[wa_id] = {'action': 'upload_rates', 'description': f"upload {len(zoho_data)} rates from {unique_vendors}", 'data': zoho_data}
-            summary = f"Extraction Complete!\n\nFound {len(zoho_data)} rates.\nVendors: {unique_vendors}\n\nReply YES to upload to Zoho CRM, or NO to cancel."
+            summary = (
+                f"📊 *Extraction Complete!*\n\n"
+                f"Found {len(zoho_data)} total rates.\n"
+                f"Vendors: {unique_vendors}\n\n"
+                f"I am about to upload these rates to Zoho CRM. Please reply *YES* to confirm, or *NO* to cancel."
+            )
             if wa_id:
                 send_whatsapp_message(wa_id, summary)
             return summary
@@ -901,7 +911,7 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
     except Exception as e:
         print(f"CRITICAL ERROR: {str(e)}")
         if wa_id:
-            send_whatsapp_message(wa_id, f"Error: {str(e)}")
+            send_whatsapp_message(wa_id, f"❌ *Error:* {str(e)}")
         return f"Error processing rate sheet: {e}"
 
 
@@ -909,33 +919,34 @@ def handle_confirmation(text, sender_wa_id):
     user_text = str(text).strip().upper()
     task = PENDING_TASKS.get(sender_wa_id)
     if not task:
-        send_whatsapp_message(sender_wa_id, "No pending action found.")
+        send_whatsapp_message(sender_wa_id, "⚠️ No pending action found.")
         return
     if user_text == "YES":
         action = task.get('action')
         data = task.get('data')
         if action == 'upload_rates':
-            send_whatsapp_message(sender_wa_id, "Confirmed. Pushing to Zoho CRM...")
+            send_whatsapp_message(sender_wa_id, "🚀 *Confirmed.* Pushing to Zoho CRM via Upsert...")
             try:
-                for i in range(0, len(data), 50):
-                    push_to_zoho_crm("Pricings", data[i: i + 50])
-                send_whatsapp_message(sender_wa_id, f"Success! {len(data)} rates uploaded to Zoho CRM.")
+                batch_size = 50
+                for i in range(0, len(data), batch_size):
+                    push_to_zoho_crm("Pricings", data[i: i + batch_size])
+                send_whatsapp_message(sender_wa_id, f"✅ *Success!* {len(data)} rates uploaded to Zoho CRM.")
             except Exception as e:
-                send_whatsapp_message(sender_wa_id, f"Error during upload: {str(e)}")
+                send_whatsapp_message(sender_wa_id, f"❌ *Error during upload:* {str(e)}")
         elif action == 'log_enquiry':
             module = task.get('module', 'Deals')
-            send_whatsapp_message(sender_wa_id, f"Confirmed. Logging enquiry in Zoho CRM ({module})...")
+            send_whatsapp_message(sender_wa_id, f"🚀 *Confirmed.* Logging your enquiry in Zoho CRM ({module})...")
             try:
                 push_to_zoho_crm(module, [data])
-                send_whatsapp_message(sender_wa_id, "Success! Enquiry logged.")
+                send_whatsapp_message(sender_wa_id, "✅ *Success!* Your enquiry has been logged. Our team will contact you shortly.")
             except Exception as e:
-                send_whatsapp_message(sender_wa_id, f"Error logging enquiry: {str(e)}")
+                send_whatsapp_message(sender_wa_id, f"❌ *Error logging enquiry:* {str(e)}")
         del PENDING_TASKS[sender_wa_id]
     elif user_text == "NO":
         del PENDING_TASKS[sender_wa_id]
-        send_whatsapp_message(sender_wa_id, "Action cancelled.")
+        send_whatsapp_message(sender_wa_id, "🛑 *Action cancelled.*")
     else:
-        send_whatsapp_message(sender_wa_id, f"Still waiting for your confirmation to {task.get('description')}. Reply YES or NO.")
+        send_whatsapp_message(sender_wa_id, f"🤔 I am still waiting for your confirmation to {task.get('description')}. Please reply *YES* to proceed or *NO* to cancel.")
 
 
 # --- UPGRADED EMAIL PROCESSING ---
@@ -1078,28 +1089,28 @@ def process_email_rfq(payload):
         admin_number = os.getenv("YOUR_WHATSAPP_NUMBER")
         if admin_number:
             msg = (
-                f"*New Email Inquiry*\n"
-                f"━━━━━━━━━━━━━━━━\n"
-                f"*Ref:* {inq_number}\n"
-                f"*Company:* {client_company}\n"
-                f"*Contact:* {client_name}\n"
-                f"*Email:* {client_email}\n"
-                f"━━━━━━━━━━━━━━━━\n"
-                f"*Shipment Details:*\n"
-                f"POL: {norm_pol}\n"
-                f"POD: {norm_pod}\n"
-                f"Mode: {mode_of_shipment}\n"
-                f"Containers: {no_of_containers} x {container_type}\n"
-                f"Commodity: {commodity}\n"
-                f"Weight: {cargo_weight} KG\n"
-                f"Volume: {volume_cbm} CBM\n"
-                f"Incoterms: {incoterms}\n"
-                f"Cargo Ready: {cargo_readiness}\n"
-                f"Dimensions: {dimensions}\n"
-                f"Remarks: {remarks or 'None'}\n"
-                f"━━━━━━━━━━━━━━━━\n"
-                f"CRM: Logged under *{account_name}*\n"
-                f"Ack email sent to client.\n\n"
+                f"📧 *New Email Inquiry Received*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔖 *Ref:* {inq_number}\n"
+                f"🏢 *Company:* {client_company}\n"
+                f"👤 *Contact:* {client_name}\n"
+                f"📬 *Email:* {client_email}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"🚢 *Shipment Details:*\n"
+                f"• POL: {norm_pol}\n"
+                f"• POD: {norm_pod}\n"
+                f"• Mode: {mode_of_shipment}\n"
+                f"• Containers: {no_of_containers} x {container_type}\n"
+                f"• Commodity: {commodity}\n"
+                f"• Weight: {cargo_weight} KG\n"
+                f"• Volume: {volume_cbm} CBM\n"
+                f"• Incoterms: {incoterms}\n"
+                f"• Cargo Ready: {cargo_readiness}\n"
+                f"• Dimensions: {dimensions}\n"
+                f"• Remarks: {remarks or 'None'}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ CRM: Logged under *{account_name}*\n"
+                f"📩 Ack email sent to client.\n\n"
                 f"Reply *APPROVE {inq_number}* to search for rates."
             )
             send_whatsapp_message(admin_number, msg)
@@ -1111,7 +1122,7 @@ def process_email_rfq(payload):
         print(f"Email Processing Error: {e}")
         admin_number = os.getenv("YOUR_WHATSAPP_NUMBER")
         if admin_number:
-            send_whatsapp_message(admin_number, f"Email Processing Error: {str(e)}")
+            send_whatsapp_message(admin_number, f"❌ *Email Processing Error:* {str(e)}")
 
 
 # --- WHATSAPP MESSAGE PROCESSING ---
@@ -1164,29 +1175,32 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                 is_first = False
             IMAGE_BUFFER[from_number].append(file_bytes)
             if not is_first: return
-            send_whatsapp_message(from_number, "Images received. Processing...")
+            send_whatsapp_message(from_number, "📥 *Images received.* Processing...")
             await asyncio.sleep(8)
             images = IMAGE_BUFFER.pop(from_number, [])
             raw_text = await extract_raw_content(images[0], filename, "image")
 
+        # PRIORITY 1: Check for pending confirmation tasks
         if from_number in PENDING_TASKS:
             print(f"DEBUG: Active task pending for {from_number}. Routing to confirmation handler.")
             handle_confirmation(raw_text, from_number)
             return
 
+        # PRIORITY 2: Filter out simple acknowledgments when no task is pending
         if msg_type == "text" and raw_text.lower() in ["no", "yes", "cancel", "stop", "ok", "thanks", "thank you", "n", "y"]:
-            send_whatsapp_message(from_number, "No active actions pending. Type help to see available commands.")
+            send_whatsapp_message(from_number, "🛑 No active actions pending to confirm or cancel. Type *help* to see available commands.")
             return
 
+        # PRIORITY 3: Detect natural language rate search phrases BEFORE AI classification
         if msg_type == "text" and any(k in raw_text.lower() for k in ["rate for", "rates for", "price for", "what is the rate"]):
-            print("DEBUG: Rate search phrase detected. Routing to AI Pricing Engine.")
-            send_whatsapp_message(from_number, "Searching active rates...")
+            print("DEBUG: Priority rate search phrase detected. Routing to AI Pricing Engine.")
+            send_whatsapp_message(from_number, "🔍 *Searching active rates...*")
             reply, extracted = process_inquiry(raw_text)
             commodity = extracted.get('commodity', 'Unknown').title()
             if any(k in commodity for k in ["Crane", "Excavator", "Machine", "Oog"]):
                 inq_number = generate_next_inquiry_number()
-                PENDING_TASKS[from_number] = {'action': 'log_enquiry', 'description': f"log OOG inquiry for {commodity}", 'data': {"Deal_Name": inq_number, "Stage": "Qualification", "Description": f"OOG: {commodity}"}}
-                send_whatsapp_message(from_number, "Project Cargo detected. Shall I log this and notify the pricing team? (Reply YES)")
+                PENDING_TASKS[from_number] = {'action': 'log_enquiry', 'description': f"log this priority OOG inquiry for {commodity}", 'data': {"Deal_Name": inq_number, "Stage": "Qualification", "Type": "Project Cargo", "Description": f"OOG: {commodity}"}}
+                send_whatsapp_message(from_number, "🏗️ I have detected a Project Cargo inquiry. Shall I log this and notify the pricing team? (Reply YES)")
                 return
             if reply:
                 send_whatsapp_message(from_number, reply)
@@ -1194,83 +1208,77 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                 pol = extracted.get('pol', 'Unknown')
                 pod = extracted.get('pod', 'Unknown')
                 if pol != 'Unknown' and pod != 'Unknown':
-                    send_whatsapp_message(from_number, f"No active rates found for {pol} to {pod} in Zoho CRM.")
+                    send_whatsapp_message(from_number, f"⚠️ No active rates found for {pol} to {pod} in Zoho CRM.")
                 else:
-                    send_whatsapp_message(from_number, "I couldn't identify the loading and discharge ports. Please be more specific.")
+                    send_whatsapp_message(from_number, "🤖 I couldn't identify specific loading and discharge ports in your request.")
             return
 
-        classification = await classify_operational_intent(raw_text if msg_type == "text" else "", caption, raw_text)
-        category = classification.get('category')
-        target = classification.get('action_target')
-        print(f"DEBUG: Classification: {category} (Target: {target})")
-
-        if category == 'command':
+        # PRIORITY 4: Detect ALL structured commands BEFORE AI classification
+        # This prevents the AI from misinterpreting commands as inquiries
+        if msg_type == "text":
             text_cmd = raw_text.lower()
-
+            
+            # HELP command
             if any(k in text_cmd for k in ["help", "menu", "commands"]):
                 help_msg = (
-                    "*Mega Move AI - Commands*\n\n"
-                    "APPROVE [INQ-XXX] - Find lowest rates\n"
-                    "QUOTE [INQ-XXX] - Generate PDF quotation\n"
-                    "SEND [INQ-XXX] - Email PDF to client\n"
-                    "TRACK [INQ-XXX] - Live container tracking\n"
-                    "METRICS - FY financial dashboard\n\n"
-                    "Or drop any file (rate sheet, tariff, inquiry, vendor bill) and the AI handles it."
+                    "🤖 *Mega Move AI - Unified Operating System*\n\n"
+                    "*💬 Text Commands:*\n"
+                    "• *APPROVE [INQ-XXX]* : Finds lowest rates & links local charges.\n"
+                    "• *QUOTE [INQ-XXX]* : Generates PDF quotation.\n"
+                    "• *SEND [INQ-XXX]* : Emails PDF to client (CCs Hitesh).\n"
+                    "• *TRACK [INQ-XXX]* : Live container tracking.\n"
+                    "• *METRICS* : FY Dashboard in INR.\n\n"
+                    "*📄 Universal Document Ingestion:*\n"
+                    "Drop any file (Rate Sheets, Tariffs, Vendor Bills, Inquiry Emails). The AI auto-classifies and processes it."
                 )
                 send_whatsapp_message(from_number, help_msg)
                 return
-
+            
+            # METRICS command
             if text_cmd.startswith("metrics"):
                 period = "overall" if "overall" in text_cmd else "FY"
-                crm = get_crm_snapshot(period=period)
-                fin = get_financial_snapshot(period=period)
+                crm, fin = get_crm_snapshot(period=period), get_financial_snapshot(period=period)
                 _, _, fy_label = get_fy_start()
                 msg = (
-                    f"*MEGA MOVE - DASHBOARD*\n"
+                    f"📊 *MEGA MOVE - EXECUTIVE DASHBOARD*\n"
                     f"Period: {'FY ' + fy_label if period == 'FY' else 'Overall'}\n\n"
-                    f"Inquiries: {crm['inquiries']}\n"
-                    f"Booked: {crm['booked']}\n"
-                    f"Conversion: {crm['conversion']:.1f}%\n\n"
-                    f"Revenue: {format_inr(fin['revenue'])}\n"
-                    f"Costs: {format_inr(fin['costs'])}\n"
-                    f"Margin: {format_inr(fin['profit'])}"
+                    f"📈 *Sales:*\n• Inquiries: {crm['inquiries']}\n• Booked: {crm['booked']}\n• Conversion: {crm['conversion']:.1f}%\n\n"
+                    f"💼 *Financials:*\n• Revenue: {format_inr(fin['revenue'])}\n• Costs: {format_inr(fin['costs'])}\n• Margin: *{format_inr(fin['profit'])}*"
                 )
                 send_whatsapp_message(from_number, msg)
                 return
-
+            
+            # TRACK command
             if text_cmd.startswith("track"):
                 ref = raw_text.split(" ", 1)[-1].strip()
                 tracking_id = ref
                 if ref.upper().startswith("INQ"):
                     container_no = get_deal_tracking_details(ref.upper())
-                    if container_no:
-                        tracking_id = container_no
+                    if container_no: tracking_id = container_no
                     else:
-                        send_whatsapp_message(from_number, f"No container number found for {ref}.")
+                        send_whatsapp_message(from_number, f"⚠️ I couldn't find a container number for {ref}.")
                         return
                 status_data = fetch_container_status(tracking_id)
-                send_whatsapp_message(from_number, f"Tracking: {ref.upper()}\nStatus: {status_data['status']}\nLocation: {status_data['current_location']}\nVessel: {status_data['vessel_name']}\nETA: {status_data['eta']}")
+                send_whatsapp_message(from_number, f"🚢 *Live Tracking Update*\nRef: {ref.upper()}\nStatus: {status_data['status']}\n📍 Location: {status_data['current_location']}\n⛴️ Vessel: {status_data['vessel_name']}\n🗓️ ETA: {status_data['eta']}")
                 return
-
+            
+            # APPROVE command - THIS WAS BROKEN, now fixed by detecting it here
             if text_cmd.startswith("approve "):
                 inq_number = raw_text.split(" ", 1)[-1].strip().upper()
                 deal = get_deal_by_id(inq_number)
                 if not deal:
-                    send_whatsapp_message(from_number, f"Inquiry {inq_number} not found.")
+                    send_whatsapp_message(from_number, f"⚠️ Inquiry {inq_number} not found.")
                     return
-                # Try to get POL/POD from dedicated fields first, then fall back to Description
-                pol = deal.get("POL") or ""
-                pod = deal.get("POD") or ""
-                if not pol or not pod:
-                    desc = deal.get("Description", "")
-                    if "Route: " in desc:
-                        route_line = [l for l in desc.split("\n") if "Route: " in l][0]
-                        parts = route_line.replace("Route: ", "").split(" to ")
-                        if len(parts) == 2:
-                            pol, pod = parts[0].strip(), parts[1].strip()
+                desc = deal.get("Description", "")
+                pol = deal.get("POL") or "Unknown"
+                pod = deal.get("POD") or "Unknown"
+                # Fall back to Description parsing if POL/POD fields are empty
+                if pol == "Unknown" and "Route: " in desc:
+                    route_line = [l for l in desc.split("\n") if "Route: " in l][0]
+                    pol, pod = route_line.replace("Route: ", "").split(" to ")
                 rates = search_rates(pol, pod)
                 if not rates:
-                    send_whatsapp_message(from_number, f"No rates found for {inq_number} ({pol} to {pod}).")
+                    send_whatsapp_message(from_number, f"⚠️ No rates found for {inq_number} ({pol} to {pod}).")
                     return
                 best = rates[0]
                 lc_data = fetch_local_charges(best['vendor'])
@@ -1279,43 +1287,34 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                     thc = lc_data.get('THC_40') if '40' in best['vehicle'] else lc_data.get('THC_20')
                     lc_str = f"THC: {thc} | BL: {lc_data.get('BL_Fee')}"
                 msg = (
-                    f"*Rates for {inq_number}*\n"
-                    f"Route: {pol} to {pod}\n"
-                    f"Vendor: {best['vendor']}\n"
-                    f"Base O/F: USD {best['price']}\n"
-                    f"Local Charges: {lc_str}\n"
-                    f"Transit: {best['transit_time']}\n"
-                    f"Valid: {best['validity_date']}\n\n"
-                    f"Reply QUOTE {inq_number} to draft PDF."
+                    f"📊 *Rates Found for {inq_number}*\nRoute: {pol} ➡️ {pod}\nVendor: {best['vendor']}\n\n🌊 Base O/F: USD {best['price']}\n🏗️ Local Charges: {lc_str}\n⏱️ Transit: {best['transit_time']}\n📅 Valid: {best['validity_date']}\n\nReply *QUOTE {inq_number}* to draft PDF."
                 )
                 send_whatsapp_message(from_number, msg)
                 return
-
+            
+            # QUOTE command
             if text_cmd.startswith("quote "):
                 inq_number = raw_text.split(" ", 1)[-1].strip().upper()
                 deal = get_deal_by_id(inq_number)
                 if not deal: return
-                pol = deal.get("POL") or ""
-                pod = deal.get("POD") or ""
-                if not pol or not pod:
+                pol = deal.get("POL") or "Unknown"
+                pod = deal.get("POD") or "Unknown"
+                if pol == "Unknown":
                     desc = deal.get("Description", "")
                     if "Route: " in desc:
                         route_line = [l for l in desc.split("\n") if "Route: " in l][0]
-                        parts = route_line.replace("Route: ", "").split(" to ")
-                        if len(parts) == 2:
-                            pol, pod = parts[0].strip(), parts[1].strip()
+                        pol, pod = route_line.replace("Route: ", "").split(" to ")
                 rates = search_rates(pol, pod)
-                if not rates:
-                    send_whatsapp_message(from_number, f"No rates found to quote for {inq_number}.")
-                    return
+                if not rates: return
                 best = rates[0]
                 lc_data = fetch_local_charges(best['vendor'])
                 margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
                 sell_price = f"USD {best['price'] * (1 + (margin_pct / 100)):.2f}"
                 pdf_bytes = generate_quotation_pdf(inq_number, pol, pod, best['vehicle'], sell_price, local_charges=lc_data)
-                upload_and_send_pdf(from_number, pdf_bytes, f"{inq_number}.pdf", f"Draft Quote for {inq_number}.")
+                upload_and_send_pdf(from_number, pdf_bytes, f"{inq_number}.pdf", f"📄 *Draft Quote Ready* for {inq_number}.")
                 return
-
+            
+            # SEND command
             if text_cmd.startswith("send "):
                 inq_number = raw_text.split(" ", 1)[-1].strip().upper()
                 deal = get_deal_by_id(inq_number)
@@ -1324,17 +1323,14 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                 client_email = "Unknown"
                 if "Sender Email: " in desc:
                     client_email = desc.split("Sender Email: ")[1].split("\n")[0].strip()
-                pol = deal.get("POL") or ""
-                pod = deal.get("POD") or ""
-                if not pol or not pod:
-                    if "Route: " in desc:
-                        route_line = [l for l in desc.split("\n") if "Route: " in l][0]
-                        parts = route_line.replace("Route: ", "").split(" to ")
-                        if len(parts) == 2:
-                            pol, pod = parts[0].strip(), parts[1].strip()
+                pol = deal.get("POL") or "Unknown"
+                pod = deal.get("POD") or "Unknown"
+                if pol == "Unknown" and "Route: " in desc:
+                    route_line = [l for l in desc.split("\n") if "Route: " in l][0]
+                    pol, pod = route_line.replace("Route: ", "").split(" to ")
                 rates = search_rates(pol, pod)
                 if not rates:
-                    send_whatsapp_message(from_number, f"No rates found to send quote for {inq_number}.")
+                    send_whatsapp_message(from_number, f"⚠️ No rates found to generate quote for {inq_number}.")
                     return
                 best = rates[0]
                 margin_pct = float(os.getenv("PROFIT_MARGIN_PERCENT", 20))
@@ -1342,9 +1338,10 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                 pdf_bytes = generate_quotation_pdf(inq_number, pol, pod, best['vehicle'], sell_price)
                 if send_email_with_attachment(client_email, f"Freight Quotation - {inq_number}", "Please find attached your quotation.", pdf_bytes, f"{inq_number}.pdf"):
                     create_zoho_record("Deals", {"id": deal.get("id"), "Stage": "Proposal/Price Quote"})
-                    send_whatsapp_message(from_number, f"Success. Quotation for {inq_number} emailed to {client_email}.")
+                    send_whatsapp_message(from_number, f"✅ *Success.* Quotation for {inq_number} emailed to {client_email}.")
                 return
-
+            
+            # BOOK command
             if text_cmd.startswith("book "):
                 inq_number = raw_text.split(" ", 1)[-1].strip().upper()
                 deal = get_deal_by_id(inq_number)
@@ -1353,36 +1350,44 @@ async def process_whatsapp_message(payload, background_tasks: BackgroundTasks):
                 pol = deal.get("POL", "Unknown")
                 vendor_email = get_primary_vendor_email(vendor_name, pol)
                 if not vendor_email:
-                    send_whatsapp_message(from_number, f"No PIC email found for {vendor_name}.")
+                    send_whatsapp_message(from_number, f"⚠️ No primary PIC email found for {vendor_name}.")
                     return
                 subject = f"Booking Request - {inq_number}"
                 body = f"Dear {vendor_name} Team,\n\nPlease process the booking for {inq_number}.\n\nBest Regards,\nMega Move India"
                 if send_email_with_attachment(vendor_email, subject, body):
-                    send_whatsapp_message(from_number, f"Booking request for {inq_number} sent to {vendor_email}.")
+                    send_whatsapp_message(from_number, f"✅ *Booking Sent.* Request for {inq_number} sent to {vendor_email}")
                 return
 
-            reply, extracted = process_inquiry(raw_text)
-            if reply:
-                send_whatsapp_message(from_number, reply)
-            else:
-                send_whatsapp_message(from_number, "Hello! I am the Mega Move AI. Send any file or command to start. Type help for options.")
+        # PRIORITY 5: Only NOW use AI classification for documents and ambiguous text
+        classification = await classify_operational_intent(raw_text if msg_type == "text" else "", caption, raw_text)
+        category = classification.get('category')
+        target = classification.get('action_target')
+        print(f"DEBUG: Cognitive Classification: {category} (Target: {target})")
 
-        elif category == 'ratesheet':
+        if category == 'ratesheet':
             vendor_name = filename.split(" ")[0] if " " in filename else "Unified Vendor"
             status = process_rate_sheet(file_bytes if file_bytes else raw_text.encode(), filename, vendor_name, from_number)
             if status:
                 send_whatsapp_message(from_number, status)
-
+        
         elif category == 'tariff':
             background_tasks.add_task(process_local_charges_pdf, file_bytes if file_bytes else raw_text.encode(), from_number)
-
+        
         elif category == 'inquiry':
             process_inquiry_email(raw_text, from_number)
-
+        
         elif category == 'vendor_bill':
-            send_whatsapp_message(from_number, "Vendor Bill received. Auditing margins...")
-            send_whatsapp_message(from_number, "Audit complete. Margin verified.")
+            send_whatsapp_message(from_number, "🚨 *Vendor Bill Received.* Auditing margins...")
+            send_whatsapp_message(from_number, "✅ *Audit Complete.* Margin verified.")
+        
+        else:
+            # Fallback: try to interpret as a rate inquiry
+            reply, extracted = process_inquiry(raw_text)
+            if reply:
+                send_whatsapp_message(from_number, reply)
+            else:
+                send_whatsapp_message(from_number, "👋 Hello! I am the Mega Move AI. Send any file or command to start. Type *help* for options.")
 
     except Exception as e:
         print(f"Unified Ingestion Error: {str(e)}")
-        send_whatsapp_message(from_number, f"System Error: {str(e)}")
+        send_whatsapp_message(from_number, f"⚠️ *System Error:* {str(e)}")

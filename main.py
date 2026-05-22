@@ -832,15 +832,19 @@ def process_local_charges_pdf(file_bytes, wa_id=None):
 
 def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
     try:
+        # Step 1: Notify user we're starting
         if wa_id:
             send_whatsapp_message(wa_id, "📥 *Rate sheet received.* Analyzing complete commercial structure...")
         
+        # Step 2: Call the enhanced parser
+        # This extracts ocean freight rates, surcharges, and local charges from the file
         ocean_freight_rates, surcharges, local_charges = parse_rate_sheet_enhanced(
             file_content,
             filename,
             vendor_name
         )
         
+        # Step 3: Progress update
         if wa_id:
             send_whatsapp_message(
                 wa_id, 
@@ -848,38 +852,104 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
                 f"📊 Ocean Freight Rates: {len(ocean_freight_rates)}\n"
                 f"💵 Surcharges: {len(surcharges)}\n"
                 f"🏗️ Local Charges: {len(local_charges)}\n\n"
-                f"Now uploading to Zoho CRM..."
+                f"Now enriching with local charges data and uploading to Zoho CRM..."
             )
         
+        # Step 4: Fetch applicable local charges from Zoho
+        # The local charges tariff should already be in Zoho from previous uploads
+        # We look it up by carrier name to get THC, detention rates, free time, etc.
+        carrier_local_charges = fetch_local_charges(vendor_name)
+        
+        # Step 5: Build Zoho pricing records
+        # CRITICAL CHANGE: We create TWO records per route (one for 20', one for 40')
+        # unless one of the rates is zero (meaning that size isn't offered on this route)
         zoho_pricing_records = []
         
         for rate in ocean_freight_rates:
-            pricing_record = {
-                "Name": f"{rate.carrier} - {rate.pol} to {rate.pod}",
-                "POL": rate.pol,
-                "POD": rate.pod,
-                "Subform_3": [{
-                    "Vendor_Name": rate.carrier,
-                    "Freight_Air_Sea": str(rate.rate_40)
-                }],
-                "Transit_Time": rate.transit_time,
-                "Route": rate.routing,
-               # "Free_Time_Days": rate.Free_Days_Time,
-                "Validity_Date": rate.validity_end.strftime("%Y-%m-%d") if rate.validity_end else None,
-               # "Rate_Version": rate.rate_version,
-               # "Detention_Rate_20": rate.detention_rate_20,
-               # "Detention_Rate_40": rate.detention_rate_40,
-            }
-            zoho_pricing_records.append(pricing_record)
+            # Normalize port names for consistency
+            normalized_pol = normalize_port_name(rate.pol)
+            normalized_pod = normalize_port_name(rate.pod)
+            
+            # Create 20-foot container record if rate exists
+            if rate.rate_20 > 0:
+                pricing_record_20 = {
+                    "Name": f"{rate.carrier} - {normalized_pol} to {normalized_pod} - 20'",
+                    "POL": normalized_pol,
+                    "POD": normalized_pod,
+                    "Container_Type": "20'",  # NEW: Specify container size
+                    
+                    # Ocean freight rate goes in Section A (Subform_3)
+                    "Subform_3": [{
+                        "Vendor_Name": rate.carrier,
+                        "Freight_Air_Sea": str(rate.rate_20)  # Use 20ft rate
+                    }],
+                    
+                    # Routing and operational details
+                    "Transit_Time": rate.transit_time,
+                    "Route": rate.routing,  # Note: Changed from "Routing" to "Route" to match your Zoho field
+                    
+                    # Validity date
+                    "Validity_Date": rate.validity_end.strftime("%Y-%m-%d") if rate.validity_end else None,
+                }
+                
+                # NEW: Add local charges data if available from Zoho lookup
+                if carrier_local_charges:
+                    # Extract detention and free time specific to 20ft containers
+                    pricing_record_20["Detention_Rate_20"] = carrier_local_charges.get("Detention_Rate_20", "")
+                    pricing_record_20["Free_Days_Time"] = carrier_local_charges.get("Free_Time_Days", "10 days")  # Default to common 10 day free time
+                    
+                    # Add THC for 20ft to Section A if available
+                    thc_20 = carrier_local_charges.get("THC_20")
+                    if thc_20:
+                        pricing_record_20["Subform_3"][0]["Origin_THC"] = str(thc_20)
+                
+                zoho_pricing_records.append(pricing_record_20)
+            
+            # Create 40-foot container record if rate exists
+            if rate.rate_40 > 0:
+                pricing_record_40 = {
+                    "Name": f"{rate.carrier} - {normalized_pol} to {normalized_pod} - 40'",
+                    "POL": normalized_pol,
+                    "POD": normalized_pod,
+                    "Container_Type": "40'",  # NEW: Specify container size
+                    
+                    # Ocean freight rate goes in Section A
+                    "Subform_3": [{
+                        "Vendor_Name": rate.carrier,
+                        "Freight_Air_Sea": str(rate.rate_40)  # Use 40ft rate
+                    }],
+                    
+                    # Routing and operational details
+                    "Transit_Time": rate.transit_time,
+                    "Route": rate.routing,
+                    
+                    # Validity date
+                    "Validity_Date": rate.validity_end.strftime("%Y-%m-%d") if rate.validity_end else None,
+                }
+                
+                # NEW: Add local charges data if available
+                if carrier_local_charges:
+                    pricing_record_40["Detention_Rate_40"] = carrier_local_charges.get("Detention_Rate_40", "")
+                    pricing_record_40["Free_Days_Time"] = carrier_local_charges.get("Free_Time_Days", "10 days")
+                    
+                    # Add THC for 40ft to Section A
+                    thc_40 = carrier_local_charges.get("THC_40")
+                    if thc_40:
+                        pricing_record_40["Subform_3"][0]["Origin_THC"] = str(thc_40)
+                
+                zoho_pricing_records.append(pricing_record_40)
         
+        # Step 6: Validation check
         if not zoho_pricing_records:
             if wa_id:
                 send_whatsapp_message(
                     wa_id,
-                    "⚠️ *Warning:* Rate sheet was processed but no rates were extracted."
+                    "⚠️ *Warning:* Rate sheet was processed but no rates were extracted. "
+                    "Please check if the file format matches expected structure."
                 )
             return "No rates extracted"
         
+        # Step 7: Upload to Zoho in batches
         batch_size = 50
         total_uploaded = 0
         
@@ -888,25 +958,39 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
             push_to_zoho_crm("Pricings", batch)
             total_uploaded += len(batch)
             
+            # Progress updates for large uploads
             if wa_id and len(zoho_pricing_records) > 50:
                 send_whatsapp_message(
                     wa_id,
                     f"⏳ Uploaded {total_uploaded} of {len(zoho_pricing_records)} rates..."
                 )
         
+        # Step 8: Success confirmation
         if wa_id:
+            # Calculate how many unique routes we captured (divide by 2 since we have 20' and 40' for each)
+            unique_routes = len(ocean_freight_rates)
+            
             summary_msg = (
                 f"✅ *Upload Complete!*\n\n"
                 f"Carrier: *{vendor_name}*\n"
-                f"Total Rates: {len(zoho_pricing_records)}\n"
+                f"Unique Routes: {unique_routes}\n"
+                f"Total Records: {len(zoho_pricing_records)} (20' + 40' rates)\n"
                 f"Surcharges Captured: {len(surcharges)}\n"
                 f"Local Charges: {len(local_charges)}\n\n"
-                f"All pricing data is now available for intelligent queries."
+                f"All pricing data is now available in Zoho CRM with complete container size differentiation."
             )
             send_whatsapp_message(wa_id, summary_msg)
         
-        return f"Successfully processed {len(zoho_pricing_records)} rates"
+        return f"Successfully processed {len(zoho_pricing_records)} rate records ({len(ocean_freight_rates)} routes)"
         
+    except Exception as e:
+        error_msg = f"❌ *Error processing rate sheet:* {str(e)}"
+        print(f"CRITICAL ERROR in rate sheet processing: {e}")
+        
+        if wa_id:
+            send_whatsapp_message(wa_id, error_msg)
+        
+        return error_msg        
     except Exception as e:
         error_msg = f"❌ *Error processing rate sheet:* {str(e)}"
         print(f"CRITICAL ERROR in rate sheet processing: {e}")

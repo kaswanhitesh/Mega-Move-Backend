@@ -1164,7 +1164,7 @@ def update_existing_records_with_local_charges(vendor_name, local_charges, wa_id
         if wa_id:
             send_whatsapp_message(wa_id, error_msg)
         return error_msg        
-        batch_size = 50  # Upload 50 records at a time
+    batch_size = 50  # Upload 50 records at a time
         total_uploaded = 0
         
         for i in range(0, len(zoho_pricing_records), batch_size):

@@ -831,171 +831,290 @@ def process_local_charges_pdf(file_bytes, wa_id=None):
 
 
 def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
+    """Handles OCEAN FREIGHT rate sheets"""
     try:
         if wa_id:
-            send_whatsapp_message(wa_id, "📥 *Rate sheet received.* Analyzing complete commercial structure...")
+            send_whatsapp_message(wa_id, "📥 *Rate sheet received.* Analyzing...")
         
-        # Parse the document - returns ocean freight, surcharges, and local charges
         ocean_freight_rates, surcharges, local_charges = parse_rate_sheet_enhanced(
-            file_content,
-            filename,
-            vendor_name
+            file_content, filename, vendor_name
         )
         
+        # Check if this is actually a LOCAL CHARGES document (no ocean freight rates)
+        if len(ocean_freight_rates) == 0 and len(local_charges) > 0:
+            # This is a local charges sheet, not ocean freight
+            # Store it temporarily and ask user which vendor
+            PENDING_TASKS[wa_id] = {
+                'action': 'update_local_charges',
+                'local_charges': local_charges,
+                'filename': filename,
+                'step': 'awaiting_vendor_name'
+            }
+            send_whatsapp_message(
+                wa_id,
+                f"📋 *Local Charges Sheet Detected*\n\n"
+                f"Found {len(local_charges)} local charge items.\n\n"
+                f"Which carrier is this for? Reply with the exact vendor name (e.g., PIL, Econship, MSC)"
+            )
+            return "Awaiting vendor confirmation for local charges"
+        
+        # Normal ocean freight processing
         if wa_id:
             send_whatsapp_message(
                 wa_id, 
                 f"✅ *Extraction complete!*\n\n"
                 f"📊 Ocean Freight Rates: {len(ocean_freight_rates)}\n"
                 f"💵 Surcharges: {len(surcharges)}\n"
-                f"🏗️ Local Charges: {len(local_charges)}\n\n"
-                f"Now uploading to Zoho CRM..."
             )
         
-        # Build helper dict for quick local charges lookup
-        local_charges_dict = {}
-        for lc in local_charges:
-            key = f"{lc.charge_type}_{lc.container_size}"
-            local_charges_dict[key] = lc
+        # Try to extract vendor email from document
+        vendor_email = extract_vendor_email(file_content, filename, vendor_name)
         
-        # Extract common detention and free time (applies to all records)
-        free_time = "10 days"  # Default
-        detention_20 = ""
-        detention_40 = ""
-        
-        for lc in local_charges:
-            if "detention" in lc.charge_type.lower() and "20" in lc.container_size:
-                detention_20 = f"{lc.currency} {lc.amount}"
-            elif "detention" in lc.charge_type.lower() and "40" in lc.container_size:
-                detention_40 = f"{lc.currency} {lc.amount}"
-        
-        # Build Zoho pricing records - one per route per container size
-        zoho_pricing_records = []
-        
-        for rate in ocean_freight_rates:
-            # Normalize port names
-            pol = normalize_port_name(rate.pol)
-            pod = normalize_port_name(rate.pod)
-            
-            # Create 20-foot record if rate exists
-            if rate.rate_20 > 0:
-                # Find applicable local charges for 20ft
-                thc_20 = local_charges_dict.get("THC_20", local_charges_dict.get("THC_ALL", None))
-                bl_fee = local_charges_dict.get("BL_FEE_ALL", None)
-                seal = local_charges_dict.get("SEAL_ALL", None)
-                doc_fees = local_charges_dict.get("DOC_ALL", None)
-                muc = local_charges_dict.get("MUC_ALL", None)
-                toll = local_charges_dict.get("TOLL_ALL", None)
-                
-                pricing_record_20 = {
-                    "Name": f"{rate.carrier} - {pol} to {pod} - 20'",
-                    "Container_Type": "20'",
-                    "POL": pol,
-                    "POD": pod,
-                    "Vendor_Name": rate.carrier,
-                    
-                    # Ocean freight (always USD)
-                    "Freight_Sea": f"USD {rate.rate_20}",
-                    
-                    # Routing and operational details
-                    "Transit_Time": rate.transit_time,
-                    "Route": rate.routing,
-                    "Validity_Date": rate.validity_end.strftime("%Y-%m-%d") if rate.validity_end else None,
-                    
-                    # Detention and free time
-                    "Free_Days_Time": free_time,
-                    "Detention_Rate_20": detention_20,
-                    
-                    # Indian local charges (always INR)
-                    "Origin_THC": f"INR {thc_20.amount}" if thc_20 else "",
-                    "BL_FEE": f"INR {bl_fee.amount}" if bl_fee else "",
-                    "Seal_Charge": f"USD {seal.amount}" if seal else "",  # Usually USD
-                    "DOC_Fees": f"INR {doc_fees.amount}" if doc_fees else "",
-                    "MUC_Charge": f"INR {muc.amount}" if muc else "",
-                    "TOLL_Charge": f"INR {toll.amount}" if toll else "",
-                    "Terminal": thc_20.terminal if thc_20 else "ALL",
-                }
-                
-                zoho_pricing_records.append(pricing_record_20)
-            
-            # Create 40-foot record if rate exists
-            if rate.rate_40 > 0:
-                # Find applicable local charges for 40ft
-                thc_40 = local_charges_dict.get("THC_40", local_charges_dict.get("THC_ALL", None))
-                bl_fee = local_charges_dict.get("BL_FEE_ALL", None)
-                seal = local_charges_dict.get("SEAL_ALL", None)
-                doc_fees = local_charges_dict.get("DOC_ALL", None)
-                muc = local_charges_dict.get("MUC_ALL", None)
-                toll = local_charges_dict.get("TOLL_ALL", None)
-                
-                pricing_record_40 = {
-                    "Name": f"{rate.carrier} - {pol} to {pod} - 40'",
-                    "Container_Type": "40'",
-                    "POL": pol,
-                    "POD": pod,
-                    "Vendor_Name": rate.carrier,
-                    
-                    # Ocean freight (always USD)
-                    "Freight_Sea": f"USD {rate.rate_40}",
-                    
-                    # Routing and operational details
-                    "Transit_Time": rate.transit_time,
-                    "Route": rate.routing,
-                    "Validity_Date": rate.validity_end.strftime("%Y-%m-%d") if rate.validity_end else None,
-                    
-                    # Detention and free time
-                    "Free_Days_Time": free_time,
-                    "Detention_Rate_40": detention_40,
-                    
-                    # Indian local charges (always INR)
-                    "Origin_THC": f"INR {thc_40.amount}" if thc_40 else "",
-                    "BL_FEE": f"INR {bl_fee.amount}" if bl_fee else "",
-                    "Seal_Charge": f"USD {seal.amount}" if seal else "",
-                    "DOC_Fees": f"INR {doc_fees.amount}" if doc_fees else "",
-                    "MUC_Charge": f"INR {muc.amount}" if muc else "",
-                    "TOLL_Charge": f"INR {toll.amount}" if toll else "",
-                    "Terminal": thc_40.terminal if thc_40 else "ALL",
-                }
-                
-                zoho_pricing_records.append(pricing_record_40)
-        
-        if not zoho_pricing_records:
-            if wa_id:
-                send_whatsapp_message(wa_id, "⚠️ *Warning:* Rate sheet processed but no rates extracted.")
-            return "No rates extracted"
-        
-        # Upload to Zoho in batches
-        batch_size = 50
-        total_uploaded = 0
-        
-        for i in range(0, len(zoho_pricing_records), batch_size):
-            batch = zoho_pricing_records[i:i + batch_size]
-            push_to_zoho_crm("Pricings", batch)
-            total_uploaded += len(batch)
-            
-            if wa_id and len(zoho_pricing_records) > 50:
-                send_whatsapp_message(wa_id, f"⏳ Uploaded {total_uploaded} of {len(zoho_pricing_records)} rates...")
-        
-        if wa_id:
-            summary_msg = (
-                f"✅ *Upload Complete!*\n\n"
-                f"Carrier: *{vendor_name}*\n"
-                f"Routes: {len(ocean_freight_rates)}\n"
-                f"Total Records: {len(zoho_pricing_records)} (20' + 40' rates)\n"
-                f"Surcharges Captured: {len(surcharges)}\n"
-                f"Local Charges: {len(local_charges)}\n\n"
-                f"All pricing data now in Zoho CRM with proper currency formatting."
+        if not vendor_email and wa_id:
+            # Email not found in document, ask user
+            PENDING_TASKS[wa_id] = {
+                'action': 'complete_rate_upload',
+                'ocean_freight_rates': ocean_freight_rates,
+                'surcharges': surcharges,
+                'local_charges': local_charges,
+                'vendor_name': vendor_name,
+                'step': 'awaiting_vendor_email'
+            }
+            send_whatsapp_message(
+                wa_id,
+                f"❓ *Vendor email not found in rate sheet.*\n\n"
+                f"Please provide email for *{vendor_name}* or reply *SKIP* to continue without email."
             )
-            send_whatsapp_message(wa_id, summary_msg)
+            return "Awaiting vendor email confirmation"
         
-        return f"Successfully processed {len(zoho_pricing_records)} records"
+        # Create records with vendor info
+        return create_ocean_freight_records(
+            ocean_freight_rates, local_charges, vendor_name, vendor_email, wa_id
+        )
         
     except Exception as e:
-        error_msg = f"❌ *Error processing rate sheet:* {str(e)}"
-        print(f"CRITICAL ERROR: {e}")
+        error_msg = f"❌ *Error:* {str(e)}"
+        print(f"ERROR: {e}")
         if wa_id:
             send_whatsapp_message(wa_id, error_msg)
         return error_msg
+
+
+def extract_vendor_email(file_content, filename, vendor_name):
+    """Try to extract vendor email from document using AI"""
+    try:
+        if filename.endswith('.pdf'):
+            pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
+            text = "".join([page.extract_text() for page in pdf_reader.pages[:2]])  # First 2 pages
+        else:
+            df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, nrows=20)
+            text = df.to_string()
+        
+        # Look for email patterns
+        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+        emails = re.findall(email_pattern, text)
+        
+        if emails:
+            return emails[0]  # Return first email found
+        
+        return None
+    except:
+        return None
+
+
+def create_ocean_freight_records(ocean_freight_rates, local_charges, vendor_name, vendor_email, wa_id=None):
+    """Creates Zoho pricing records with ocean freight + any available local charges"""
+    
+    # Build local charges lookup
+    local_charges_dict = {}
+    for lc in local_charges:
+        key = f"{lc.charge_type}_{lc.container_size}"
+        local_charges_dict[key] = lc
+    
+    # Extract detention and free time
+    free_time = "10 days"
+    detention_20 = ""
+    detention_40 = ""
+    
+    for lc in local_charges:
+        if "detention" in lc.charge_type.lower():
+            if "20" in lc.container_size:
+                detention_20 = f"{lc.currency} {lc.amount}"
+            elif "40" in lc.container_size:
+                detention_40 = f"{lc.currency} {lc.amount}"
+    
+    zoho_pricing_records = []
+    
+    for rate in ocean_freight_rates:
+        pol = normalize_port_name(rate.pol)
+        pod = normalize_port_name(rate.pod)
+        
+        # 20ft record
+        if rate.rate_20 > 0:
+            thc_20 = local_charges_dict.get("THC_20", local_charges_dict.get("THC_ALL", None))
+            
+            record_20 = {
+                "Name": f"{vendor_name} - {pol} to {pod} - 20'",
+                "Container_Type": "20'",
+                "POL": pol,
+                "POD": pod,
+                "Vendor_Name": vendor_name,
+                "Vendor_Email": vendor_email or "",
+                "Freight_Sea": f"USD {rate.rate_20}",
+                "Transit_Time": rate.transit_time,
+                "Route": rate.routing,
+                "Validity_Date": rate.validity_end.strftime("%Y-%m-%d") if rate.validity_end else None,
+                "Free_Days_Time": free_time,
+                "Detention_Rate_20": detention_20,
+                "Origin_THC": f"INR {thc_20.amount}" if thc_20 else "",
+                "Terminal": thc_20.terminal if thc_20 else "ALL",
+            }
+            zoho_pricing_records.append(record_20)
+        
+        # 40ft record
+        if rate.rate_40 > 0:
+            thc_40 = local_charges_dict.get("THC_40", local_charges_dict.get("THC_ALL", None))
+            
+            record_40 = {
+                "Name": f"{vendor_name} - {pol} to {pod} - 40'",
+                "Container_Type": "40'",
+                "POL": pol,
+                "POD": pod,
+                "Vendor_Name": vendor_name,
+                "Vendor_Email": vendor_email or "",
+                "Freight_Sea": f"USD {rate.rate_40}",
+                "Transit_Time": rate.transit_time,
+                "Route": rate.routing,
+                "Validity_Date": rate.validity_end.strftime("%Y-%m-%d") if rate.validity_end else None,
+                "Free_Days_Time": free_time,
+                "Detention_Rate_40": detention_40,
+                "Origin_THC": f"INR {thc_40.amount}" if thc_40 else "",
+                "Terminal": thc_40.terminal if thc_40 else "ALL",
+            }
+            zoho_pricing_records.append(record_40)
+    
+    # Upload to Zoho
+    batch_size = 50
+    for i in range(0, len(zoho_pricing_records), batch_size):
+        batch = zoho_pricing_records[i:i + batch_size]
+        push_to_zoho_crm("Pricings", batch)
+    
+    if wa_id:
+        send_whatsapp_message(
+            wa_id,
+            f"✅ *Upload Complete!*\n\n"
+            f"Carrier: *{vendor_name}*\n"
+            f"Email: {vendor_email or 'Not provided'}\n"
+            f"Total Records: {len(zoho_pricing_records)}"
+        )
+    
+    return f"Processed {len(zoho_pricing_records)} records"
+
+
+def update_existing_records_with_local_charges(vendor_name, local_charges, wa_id=None):
+    """Updates existing Zoho pricing records to add local charges data"""
+    
+    if wa_id:
+        send_whatsapp_message(wa_id, f"🔍 *Finding {vendor_name} pricing records in Zoho...*")
+    
+    # Search for all pricing records from this vendor
+    access_token = get_zoho_access_token()
+    url = f"https://www.zohoapis.in/crm/v3/Pricings/search?criteria=(Vendor_Name:equals:{vendor_name})"
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    res = requests.get(url, headers=headers)
+    
+    if res.status_code != 200 or not res.json().get("data"):
+        if wa_id:
+            send_whatsapp_message(wa_id, f"⚠️ No existing {vendor_name} records found to update.")
+        return "No records found"
+    
+    existing_records = res.json()["data"]
+    
+    # Build local charges data
+    local_charges_dict = {}
+    for lc in local_charges:
+        key = f"{lc.charge_type}_{lc.container_size}"
+        local_charges_dict[key] = lc
+    
+    # Extract common values
+    free_time = "10 days"
+    detention_20 = ""
+    detention_40 = ""
+    bl_fee = ""
+    seal = ""
+    doc_fees = ""
+    muc = ""
+    toll = ""
+    
+    for lc in local_charges:
+        lc_type = lc.charge_type.upper()
+        if "DETENTION" in lc_type and "20" in lc.container_size:
+            detention_20 = f"{lc.currency} {lc.amount}"
+        elif "DETENTION" in lc_type and "40" in lc.container_size:
+            detention_40 = f"{lc.currency} {lc.amount}"
+        elif "BL" in lc_type or "BILL" in lc_type:
+            bl_fee = f"INR {lc.amount}"
+        elif "SEAL" in lc_type:
+            seal = f"USD {lc.amount}"
+        elif "DOC" in lc_type:
+            doc_fees = f"INR {lc.amount}"
+        elif "MUC" in lc_type:
+            muc = f"INR {lc.amount}"
+        elif "TOLL" in lc_type:
+            toll = f"INR {lc.amount}"
+    
+    # Update each record
+    updates = []
+    for record in existing_records:
+        container_type = record.get("Container_Type", "")
+        
+        # Get THC for this container size
+        if "20" in container_type:
+            thc = local_charges_dict.get("THC_20", local_charges_dict.get("THC_ALL", None))
+            det_rate = detention_20
+        else:
+            thc = local_charges_dict.get("THC_40", local_charges_dict.get("THC_ALL", None))
+            det_rate = detention_40
+        
+        update_data = {
+            "id": record["id"],
+            "Free_Days_Time": free_time,
+            "BL_FEE": bl_fee,
+            "Seal_Charge": seal,
+            "DOC_Fees": doc_fees,
+            "MUC_Charge": muc,
+            "TOLL_Charge": toll,
+        }
+        
+        if thc:
+            update_data["Origin_THC"] = f"INR {thc.amount}"
+            update_data["Terminal"] = thc.terminal
+        
+        if "20" in container_type:
+            update_data["Detention_Rate_20"] = det_rate
+        else:
+            update_data["Detention_Rate_40"] = det_rate
+        
+        updates.append(update_data)
+    
+    # Push updates to Zoho
+    batch_size = 50
+    for i in range(0, len(updates), batch_size):
+        batch = updates[i:i + batch_size]
+        push_to_zoho_crm("Pricings", batch)
+    
+    if wa_id:
+        send_whatsapp_message(
+            wa_id,
+            f"✅ *Local Charges Added!*\n\n"
+            f"Updated {len(updates)} {vendor_name} pricing records with:\n"
+            f"- THC rates\n"
+            f"- Detention charges\n"
+            f"- Documentation fees\n"
+            f"- Free time: {free_time}"
+        )
+    
+    return f"Updated {len(updates)} records"
         
         # Step 7: Upload to Zoho in batches
         batch_size = 50
@@ -1090,14 +1209,65 @@ def process_rate_sheet(file_content, filename, vendor_name, wa_id=None):
         return error_msg
 
 def handle_confirmation(text, sender_wa_id):
-    user_text = str(text).strip().upper()
+    user_text = str(text).strip()
     task = PENDING_TASKS.get(sender_wa_id)
+    
     if not task:
         send_whatsapp_message(sender_wa_id, "⚠️ No pending action found.")
         return
-    if user_text == "YES":
-        action = task.get('action')
+    
+    action = task.get('action')
+    
+    # NEW: Handle vendor email confirmation for ocean freight (expects actual email text)
+    if action == 'complete_rate_upload' and task.get('step') == 'awaiting_vendor_email':
+        vendor_email = user_text if user_text.upper() != "SKIP" else None
+        
+        result = create_ocean_freight_records(
+            task['ocean_freight_rates'],
+            task['local_charges'],
+            task['vendor_name'],
+            vendor_email,
+            sender_wa_id
+        )
+        
+        del PENDING_TASKS[sender_wa_id]
+        return
+    
+    # NEW: Handle vendor name confirmation for local charges (expects actual vendor name)
+    if action == 'update_local_charges' and task.get('step') == 'awaiting_vendor_name':
+        vendor_name = user_text.strip()
+        
+        # Now ask for email
+        task['vendor_name'] = vendor_name
+        task['step'] = 'awaiting_vendor_email'
+        
+        send_whatsapp_message(
+            sender_wa_id,
+            f"📧 *Vendor email for {vendor_name}?*\n\nReply with email or *SKIP*"
+        )
+        return
+    
+    # NEW: Handle vendor email for local charges (expects actual email text)
+    if action == 'update_local_charges' and task.get('step') == 'awaiting_vendor_email':
+        vendor_email = user_text if user_text.upper() != "SKIP" else None
+        vendor_name = task['vendor_name']
+        
+        # Update existing records
+        update_existing_records_with_local_charges(
+            vendor_name,
+            task['local_charges'],
+            sender_wa_id
+        )
+        
+        del PENDING_TASKS[sender_wa_id]
+        return
+    
+    # EXISTING: YES/NO confirmations
+    user_text_upper = user_text.upper()
+    
+    if user_text_upper == "YES":
         data = task.get('data')
+        
         if action == 'upload_rates':
             send_whatsapp_message(sender_wa_id, "🚀 *Confirmed.* Pushing to Zoho CRM via Upsert...")
             try:
@@ -1107,6 +1277,7 @@ def handle_confirmation(text, sender_wa_id):
                 send_whatsapp_message(sender_wa_id, f"✅ *Success!* {len(data)} rates uploaded to Zoho CRM.")
             except Exception as e:
                 send_whatsapp_message(sender_wa_id, f"❌ *Error during upload:* {str(e)}")
+        
         elif action == 'log_enquiry':
             module = task.get('module', 'Deals')
             send_whatsapp_message(sender_wa_id, f"🚀 *Confirmed.* Logging your enquiry in Zoho CRM ({module})...")
@@ -1115,13 +1286,15 @@ def handle_confirmation(text, sender_wa_id):
                 send_whatsapp_message(sender_wa_id, "✅ *Success!* Your enquiry has been logged. Our team will contact you shortly.")
             except Exception as e:
                 send_whatsapp_message(sender_wa_id, f"❌ *Error logging enquiry:* {str(e)}")
+        
         del PENDING_TASKS[sender_wa_id]
-    elif user_text == "NO":
+    
+    elif user_text_upper == "NO":
         del PENDING_TASKS[sender_wa_id]
         send_whatsapp_message(sender_wa_id, "🛑 *Action cancelled.*")
+    
     else:
         send_whatsapp_message(sender_wa_id, f"🤔 I am still waiting for your confirmation to {task.get('description')}. Please reply *YES* to proceed or *NO* to cancel.")
-
 
 # --- UPGRADED EMAIL PROCESSING ---
 def process_email_rfq(payload):
